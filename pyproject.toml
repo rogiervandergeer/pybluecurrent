@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+
+[project]
+name = "pybluecurrent"
+authors = [
+    {name = "Rogier van der Geer", email = "rogier@vander-geer.nl"},
+]
+description = "Python client for BlueCurrent charge points."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+keywords = [
+    "api",
+    "blue current",
+    "electric vehicle",
+    "ev",
+]
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed"
+]
+dependencies = [
+    "requests>=2.31.0",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = ["black==23.3.0", "pytest>=7.3.1", "pytest-mock>=3.11.0"]
+
+[project.urls]
+Repository = "https://github.com/rogiervandergeer/pybluecurrent"
+
+[tool.setuptools.package-data]
+pybluecurrent = ["py.typed"]
+
+[tool.setuptools_scm]
+write_to = "src/pybluecurrent/_version.py"
+
+[tool.black]
+line-length = 120
+target-version = ["py310"]
