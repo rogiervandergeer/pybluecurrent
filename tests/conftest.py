@@ -1,8 +1,9 @@
-from os import environ
 from asyncio import get_event_loop_policy, run
-from pytest import fixture, mark, skip
-from pytest_asyncio import fixture as async_fixture
+from os import environ
+from typing import AsyncGenerator
 
+from pytest import fixture, skip
+from pytest_asyncio import fixture as async_fixture
 
 from pybluecurrent import BlueCurrentClient
 
@@ -13,11 +14,11 @@ def client() -> BlueCurrentClient:
 
 
 @fixture(scope="session")
-def client_with_auth() -> BlueCurrentClient:
+def client_with_auth() -> BlueCurrentClient | None:
     try:
         return BlueCurrentClient(environ["BLUECURRENT_USERNAME"], environ["BLUECURRENT_PASSWORD"])
     except KeyError:
-        skip("Requires authentication.")
+        raise skip("Requires authentication.")
 
 
 @fixture(scope="session")
@@ -29,17 +30,18 @@ def event_loop():
 
 
 @async_fixture(scope="session")
-async def connected_client() -> BlueCurrentClient:
+async def connected_client() -> AsyncGenerator[BlueCurrentClient, None]:
     try:
         client = BlueCurrentClient(environ["BLUECURRENT_USERNAME"], environ["BLUECURRENT_PASSWORD"])
     except KeyError:
         skip("Requires authentication.")
+        return
     async with client:
         yield client
 
 
 @fixture(scope="session")
-def evse_id(client_with_auth: client_with_auth) -> str:
+def evse_id(client_with_auth: BlueCurrentClient) -> str:
     async def _get_charge_points(client: BlueCurrentClient) -> list:
         async with client:
             charge_points = await client.get_charge_points()

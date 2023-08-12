@@ -1,11 +1,10 @@
-from asyncio import Task, create_task, sleep, wait_for, TimeoutError, run
-from asyncio_multisubscriber_queue import MultisubscriberQueue
-from typing import Iterable
-
-from logging import getLogger
+from asyncio import Task, create_task, run, wait_for
 from json import dumps, loads
+from logging import getLogger
+from typing import Any, Iterable
 from uuid import uuid4
 
+from asyncio_multisubscriber_queue import MultisubscriberQueue
 from requests import get, post
 from sjcl import SJCL
 from websockets import WebSocketClientProtocol, connect
@@ -32,7 +31,7 @@ class BlueCurrentClient:
     async def __aenter__(self) -> "BlueCurrentClient":
         self.logger.debug("Creating BlueCurrent websocket connection")
         self.connection = connect(self.socket_url, user_agent_header=self._user_agent)
-        self.socket: WebSocketClientProtocol = await self.connection.__aenter__()
+        self.socket = await self.connection.__aenter__()
         self.consumer = create_task(self._handler())
         if self.token is None:
             await self._login()
@@ -45,7 +44,7 @@ class BlueCurrentClient:
         await self.connection.__aexit__(exc_type, exc_val, exc_tb)
         self.consumer, self.socket = None, None
 
-    async def get_account(self):
+    async def get_account(self) -> dict[str, bool | str]:
         """
         Get account information.
 
@@ -221,7 +220,7 @@ class BlueCurrentClient:
             ),
             token=True,
         )
-        result = await self._receive("RECEIVED_UNLOCK_CONNECTOR")
+        await self._receive("RECEIVED_UNLOCK_CONNECTOR")
         return await self._receive("STATUS_UNLOCK_CONNECTOR", timeout=30)
 
     async def soft_reset(self, evse_id: str):
@@ -273,7 +272,7 @@ class BlueCurrentClient:
         response.raise_for_status()
         return response.json()["data"]
 
-    def get_contracts(self) -> list[dict[str]]:
+    def get_contracts(self) -> list[dict[str, str]]:
         """
         Get your contracts.
 
@@ -296,7 +295,7 @@ class BlueCurrentClient:
         response.raise_for_status()
         return response.json()["contracts"]
 
-    def get_grids(self) -> list[dict[str]]:
+    def get_grids(self) -> list[dict[str, bool | dict[str, str] | str]]:
         """
         Get your grid connections.
 
@@ -312,16 +311,20 @@ class BlueCurrentClient:
             ]
         """
         response = get(
-            f"{self.api_url}/getgrids", headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent}
+            f"{self.api_url}/getgrids",
+            headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
         )
         response.raise_for_status()
         return response.json()["grids"]
 
-    def get_transactions(self, newest_first: bool = True, page: int = 1) -> dict[str, int | dict[str]]:
+    def get_transactions(
+        self, evse_id: str, newest_first: bool = True, page: int = 1
+    ) -> dict[str, int | list[dict[str, Any]]]:
         """
         Get a list of transactions.
 
         Args:
+            evse_id: A charge point ID.
             newest_first: If True, start with the most recent transaction. Defaults to True.
             page: Page to get. Defaults to 1.
 
@@ -359,15 +362,17 @@ class BlueCurrentClient:
             f"sort_field_order={'DESC' if newest_first else 'ASC'}&"
             f"sort_field=stoppedtimestamp",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
+            data=dumps({"chargepoints": [{"chargepoint_id": evse_id}]}).encode("UTF-8"),
         )
         response.raise_for_status()
         return response.json()["data"]
 
-    def iterate_transactions(self, newest_first: bool = True) -> Iterable[dict]:
+    def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> Iterable[dict[str, Any]]:
         """
         Iterate through your transactions.
 
         Args:
+            evse_id: A charge point ID.
             newest_first: If True, start with the most recent transaction. Defaults to True.
 
         Returns:
@@ -391,9 +396,9 @@ class BlueCurrentClient:
         """
         next_page = 1
         while next_page is not None:
-            transactions = self.get_transactions(newest_first=newest_first, page=next_page)
-            yield from transactions["transactions"]
-            next_page = transactions["next_page"]
+            transactions = self.get_transactions(evse_id=evse_id, newest_first=newest_first, page=next_page)
+            yield from transactions["transactions"]  # type: ignore
+            next_page = transactions["next_page"]  # type: ignore
 
     async def _login(self) -> None:
         await self._send(
@@ -424,6 +429,8 @@ class BlueCurrentClient:
         )
 
     async def _handler(self) -> None:
+        if self.socket is None:
+            raise RuntimeError(f"{self.__class__.__name__} is not connected.")
         async for message in self.socket:
             self.logger.debug(f"Received message: {message}")
             await self.queue.put(loads(message))
@@ -432,7 +439,7 @@ class BlueCurrentClient:
     def _user_agent(self) -> str:
         return f"pybluecurrent {__version__.split('+')[0]}"
 
-    async def _receive(self, obj: str, timeout: int = 10) -> dict[str]:
+    async def _receive(self, obj: str, timeout: int = 10) -> dict[str, Any]:
         with self.queue.queue() as q:
             while True:
                 message = await wait_for(q.get(), timeout=timeout)
@@ -441,7 +448,9 @@ class BlueCurrentClient:
                 if message.get("object") == obj:
                     return message
 
-    async def _send(self, data: dict[str], token: bool = False):
+    async def _send(self, data: dict[str, Any], token: bool = False):
         if token:
             data.update(dict(Authorization=f"Token {self.token}"))
+        if self.socket is None:
+            raise RuntimeError(f"{self.__class__.__name__} is not connected.")
         await self.socket.send(dumps(data, ensure_ascii=False))

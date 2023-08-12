@@ -1,8 +1,8 @@
-from pybluecurrent import BlueCurrentClient
-
-from pytest import fixture, mark, raises, skip
 from itertools import islice
 
+from pytest import fixture, mark, raises, skip
+
+from pybluecurrent import BlueCurrentClient
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
 
 
@@ -64,12 +64,6 @@ class TestSocketApi:
         assert status["evse_id"] == evse_id
 
     @mark.asyncio
-    async def test_get_charge_point_status(self, connected_client: BlueCurrentClient, evse_id: str):
-        status = await connected_client.get_async_charge_point_status(evse_id=evse_id)
-        assert isinstance(status, dict)
-        assert status["evse_id"] == evse_id
-
-    @mark.asyncio
     async def test_get_charge_point_settings(self, connected_client: BlueCurrentClient, evse_id: str):
         settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
         assert isinstance(settings, dict)
@@ -95,7 +89,7 @@ class TestSocketApi:
     @mark.asyncio
     @mark.skip("Do not change chargepoint status.")
     async def test_soft_reset(self, connected_client: BlueCurrentClient, evse_id: str):
-        result = await connected_client.soft_reset(evse_id=evse_id)
+        _ = await connected_client.soft_reset(evse_id=evse_id)
 
     @mark.asyncio
     async def test_set_status(self, connected_client: BlueCurrentClient, evse_id: str):
@@ -135,12 +129,13 @@ class TestRestApi:
         assert len(grids) > 0
         assert "id" in grids[0]
 
-    def test_get_transactions(self, authenticated_client: BlueCurrentClient):
-        transactions = authenticated_client.get_transactions()
-        print(transactions)
+    def test_get_transactions(self, authenticated_client: BlueCurrentClient, evse_id: str):
+        transactions = authenticated_client.get_transactions(evse_id)
+        assert "transactions" in transactions
 
-    def test_iterate_transactions(self, authenticated_client: BlueCurrentClient):
-        transactions = authenticated_client.get_transactions()
-        if transactions["total_pages"] < 3:  # If there are less than three pages, there might be less than 30.
+    def test_iterate_transactions(self, authenticated_client: BlueCurrentClient, evse_id: str):
+        transactions = authenticated_client.get_transactions(evse_id)
+        # If there are less than three pages, there might be less than 30.
+        if transactions["total_pages"] < 3:  # type: ignore
             skip("Not enough transactions.")
-        assert len({t["transaction_id"] for t in islice(authenticated_client.iterate_transactions(), 30)}) == 30
+        assert len({t["transaction_id"] for t in islice(authenticated_client.iterate_transactions(evse_id), 30)}) == 30
