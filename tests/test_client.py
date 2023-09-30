@@ -1,4 +1,6 @@
+from datetime import date
 from itertools import islice
+from os import environ
 
 from pytest import fixture, mark, raises, skip
 
@@ -36,6 +38,7 @@ class TestSocketApi:
     async def test_get_account(self, connected_client: BlueCurrentClient):
         account = await connected_client.get_account()
         assert "full_name" in account
+        assert isinstance(account["first_login_app"], date)
 
     @mark.asyncio
     async def test_get_charge_cards(self, connected_client: BlueCurrentClient):
@@ -43,6 +46,15 @@ class TestSocketApi:
         if len(charge_cards) == 0:
             skip(reason="No charge cards.")
         assert all("uid" in charge_card for charge_card in charge_cards)
+        assert all(
+            obj is None or isinstance(obj, date)
+            for charge_card in charge_cards
+            for obj in [
+                charge_card["date_created"],
+                charge_card["date_modified"],
+                charge_card["date_became_invalid"],
+            ]
+        )
 
     @mark.asyncio
     async def test_get_charge_points(self, connected_client: BlueCurrentClient):
@@ -92,6 +104,7 @@ class TestSocketApi:
         _ = await connected_client.soft_reset(evse_id=evse_id)
 
     @mark.asyncio
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
     async def test_set_status(self, connected_client: BlueCurrentClient, evse_id: str):
         before_status = connected_client.get_charge_point_status(evse_id=evse_id)
         if before_status["activity"] != "available":

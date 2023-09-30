@@ -11,6 +11,7 @@ from websockets import WebSocketClientProtocol, connect
 
 from pybluecurrent._version import __version__
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
+from pybluecurrent.utilities import parse_datetime_keys, parse_list_datetime_keys
 
 
 class BlueCurrentClient:
@@ -65,7 +66,7 @@ class BlueCurrentClient:
         await self._send(dict(command="GET_ACCOUNT"), token=True)
         result = await self._receive("ACCOUNT")
         del result["object"]
-        return result
+        return parse_datetime_keys(result, formats={"first_login_app": ("%d-%b-%y", True)})
 
     async def get_charge_cards(self):
         """
@@ -79,13 +80,21 @@ class BlueCurrentClient:
                 "name": "My Charge Cards",
                 "customer_name": "Your Name",
                 "valid": 1,
-                "date_created": "2023-06-27",
-                "date_modified": "2023-07-11",
-                "date_became_invalid": ""
+                "date_created": date(2023, 6, 27),
+                "date_modified": date(2023, 7, 11),
+                "date_became_invalid": None
             }
         """
         await self._send(dict(command="GET_CHARGE_CARDS"), token=True)
-        return (await self._receive("CHARGE_CARDS"))["cards"]
+        result = (await self._receive("CHARGE_CARDS"))["cards"]
+        return parse_list_datetime_keys(
+            result,
+            formats={
+                "date_created": ("%Y-%m-%d", True),
+                "date_modified": ("%Y-%m-%d", True),
+                "date_became_invalid": ("%Y-%m-%d", True),
+            },
+        )
 
     async def get_charge_points(self):
         """
@@ -192,10 +201,7 @@ class BlueCurrentClient:
 
         Returns:
             A dictionary with two keys:
-            {
-                "trees": 1,
-                "co2": 12.345
-            }
+            {"trees": 1, "co2": 12.345}
         """
         await self._send(dict(command="GET_SUSTAINABILITY_STATUS"), token=True)
         result = await self._receive("SUSTAINABILITY_STATUS")
@@ -258,8 +264,8 @@ class BlueCurrentClient:
                 "smartcharging_max_usage": 6,
                 "max_offline": 10,
                 "offline_since": "",
-                "start_datetime": "20230724 15:25:33",
-                "stop_datetime": "20230726 07:48:40",
+                "start_datetime": datetime(2023, 7, 24, 15, 25, 33),
+                "stop_datetime": datetime(2023, 7, 26, 7, 48, 40),
                 "total_cost": 9.93,
                 "vehicle_status": "A",
                 "evse_id": "BCU123456",
@@ -270,7 +276,14 @@ class BlueCurrentClient:
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
         )
         response.raise_for_status()
-        return response.json()["data"]
+        result = response.json()["data"]
+        return parse_datetime_keys(
+            result,
+            formats={
+                "start_datetime": ("%Y%m%d %H:%M:%S", False),
+                "stop_datetime": ("%Y%m%d %H:%M:%S", False),
+            },
+        )
 
     def get_contracts(self) -> list[dict[str, str]]:
         """
@@ -341,8 +354,8 @@ class BlueCurrentClient:
                         "chargepoint_id": "BCU123456",
                         "chargepoint_type": "HIDDEN",
                         "evse_name": "Charge Point Name",
-                        "started_at": "01-07-2023 12:34:56",
-                        "end_time": "01-07-2023 14:00:00",
+                        "started_at": datetime(2023, 7, 1, 12, 34, 56),
+                        "end_time": datetime(2023, 7, 1, 14, 0, 0),
                         "kwh": 12.34,
                         "card_id": "NL-ABC-123456-0",
                         "card_name": "Card Name",
@@ -365,7 +378,12 @@ class BlueCurrentClient:
             data=dumps({"chargepoints": [{"chargepoint_id": evse_id}]}).encode("UTF-8"),
         )
         response.raise_for_status()
-        return response.json()["data"]
+        result = response.json()["data"]
+        result["transactions"] = parse_list_datetime_keys(
+            result["transactions"],
+            formats={"started_at": ("%d-%m-%Y %H:%M:%S", False), "end_time": ("%d-%m-%Y %H:%M:%S", False)},
+        )
+        return result
 
     def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> Iterable[dict[str, Any]]:
         """
@@ -383,8 +401,8 @@ class BlueCurrentClient:
                 "chargepoint_id": "BCU123456",
                 "chargepoint_type": "HIDDEN",
                 "evse_name": "Charge Point Name",
-                "started_at": "01-07-2023 12:34:56",
-                "end_time": "01-07-2023 14:00:00",
+                "started_at": datetime(2023, 7, 1, 12, 34, 56),
+                "end_time": datetime(2023, 7, 1, 14, 0, 0),
                 "kwh": 12.34,
                 "card_id": "NL-ABC-123456-0",
                 "card_name": "Card Name",
