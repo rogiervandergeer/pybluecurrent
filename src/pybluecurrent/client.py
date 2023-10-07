@@ -1,4 +1,5 @@
 from asyncio import Task, create_task, run, wait_for
+from datetime import date, datetime
 from json import dumps, loads
 from logging import getLogger
 from typing import Any, Iterable
@@ -45,7 +46,7 @@ class BlueCurrentClient:
         await self.connection.__aexit__(exc_type, exc_val, exc_tb)
         self.consumer, self.socket = None, None
 
-    async def get_account(self) -> dict[str, bool | str]:
+    async def get_account(self) -> dict[str, bool | date | str]:
         """
         Get account information.
 
@@ -59,7 +60,7 @@ class BlueCurrentClient:
                 "developer_mode_enabled": False,
                 "tel": "",
                 "marketing_target": "bluecurrent",
-                "first_login_app": "01-JAN-20",
+                "first_login_app": date(2020, 1, 1),
                 "hubspot_user_identity": "a_very_long_string"
             }
         """
@@ -68,7 +69,7 @@ class BlueCurrentClient:
         del result["object"]
         return parse_datetime_keys(result, formats={"first_login_app": ("%d-%b-%y", True)})
 
-    async def get_charge_cards(self):
+    async def get_charge_cards(self) -> list[dict[str, date | int | str | None]]:
         """
         Get your charge cards:
 
@@ -96,7 +97,7 @@ class BlueCurrentClient:
             },
         )
 
-    async def get_charge_points(self):
+    async def get_charge_points(self) -> list[dict[str, bool | dict | str]]:
         """
         Get a list of your charge points.
 
@@ -132,7 +133,7 @@ class BlueCurrentClient:
         await self._send(dict(command="GET_CHARGE_POINTS"), token=True)
         return (await self._receive("CHARGE_POINTS"))["data"]
 
-    async def get_charge_point_settings(self, evse_id: str) -> dict[str, bool | dict]:
+    async def get_charge_point_settings(self, evse_id: str) -> dict[str, bool | dict | str]:
         """
         Get the settings of a charge point.
 
@@ -188,10 +189,12 @@ class BlueCurrentClient:
         return (await self._receive("GRID_STATUS"))["data"]
 
     async def get_sessions(self, evse_id: str):
+        """Does not work"""
         await self._send(dict(command="GET_SESSIONS"), token=True)
         return await self._receive("SESSIONS")
 
     async def get_status(self, evse_id: str):
+        """Returns a useless object with evse_id and your full name"""
         await self._send(dict(command="GET_STATUS", evse_id=evse_id), token=True)
         return await self._receive("STATUS")
 
@@ -208,7 +211,14 @@ class BlueCurrentClient:
         result.pop("object")
         return result
 
-    async def set_status(self, evse_id: str, enabled: bool):
+    async def set_status(self, evse_id: str, enabled: bool) -> None:
+        """
+        Enable or disable a charge point.
+
+        Args:
+            evse_id: The ID of the charge point.
+            enabled: Boolean that indicates the desired status.
+        """
         if enabled:
             await self._send(dict(command="SET_OPERATIVE", evse_id=evse_id, flow_id=str(uuid4())), token=True)
             await self._receive("RECEIVED_SET_OPERATIVE")
@@ -219,6 +229,7 @@ class BlueCurrentClient:
             await self._receive("STATUS_SET_INOPERATIVE", timeout=30)
 
     async def unlock_connector(self, evse_id: str):
+        # TODO: test
         await self._send(
             dict(
                 command="UNLOCK_CONNECTOR",
@@ -238,6 +249,14 @@ class BlueCurrentClient:
     ## Synchronous API ##
 
     def login(self) -> None:
+        """
+        Retrieves a connection token.
+
+        This method does not do anything if the client is already logged in.
+        Connection to the websocket api (async with client) automatically logs in the client,
+        so this endpoint is not needed when using the async API.
+        """
+
         async def _login(client: BlueCurrentClient) -> None:
             async with client:
                 pass
@@ -245,7 +264,7 @@ class BlueCurrentClient:
         if self.token is None:
             run(_login(self))
 
-    def get_charge_point_status(self, evse_id: str):
+    def get_charge_point_status(self, evse_id: str) -> dict[str, datetime | float | int | str | None]:
         """
         Get the status of a charge point.
 
