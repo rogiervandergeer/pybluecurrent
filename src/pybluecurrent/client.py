@@ -193,11 +193,6 @@ class BlueCurrentClient:
         await self._send(dict(command="GET_SESSIONS"), token=True)
         return await self._receive("SESSIONS")
 
-    async def get_status(self, evse_id: str):
-        """Returns a useless object with evse_id and your full name"""
-        await self._send(dict(command="GET_STATUS", evse_id=evse_id), token=True)
-        return await self._receive("STATUS")
-
     async def get_sustainability_status(self) -> dict[str, float | int]:
         """
         Get statistics on the sustainability of all your charge points.

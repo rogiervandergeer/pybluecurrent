@@ -71,11 +71,6 @@ class TestSocketApi:
         assert "id" in status
 
     @mark.asyncio
-    async def test_get_status(self, connected_client: BlueCurrentClient, evse_id: str):
-        status = await connected_client.get_status(evse_id=evse_id)
-        assert status["evse_id"] == evse_id
-
-    @mark.asyncio
     async def test_get_charge_point_settings(self, connected_client: BlueCurrentClient, evse_id: str):
         settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
         assert isinstance(settings, dict)
