@@ -100,6 +100,41 @@ class TestSocketApi:
 
     @mark.asyncio
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
+    async def test_set_plug_and_charge_card(self, connected_client: BlueCurrentClient, evse_id: str):
+        async def _get_plug_and_charge_card_uid() -> str | None:
+            settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+            try:
+                return settings["plug_and_charge_charge_card"]["uid"]  # type: ignore
+            except KeyError:
+                return None
+
+        # Get the original card, if any
+        before_card = await _get_plug_and_charge_card_uid()
+
+        # Get all possible cards, including no card
+        charge_cards = await connected_client.get_charge_cards()
+        if len(charge_cards) == 0:
+            skip(reason="No charge cards.")
+        uids: list[str | None] = [charge_card["uid"] for charge_card in charge_cards] + [None]  # type: ignore
+        # Set each card as plug_and_charge_card
+        for uid in uids:
+            if uid != before_card:
+                await connected_client.set_plug_and_charge_charge_card(evse_id=evse_id, uid=uid)
+                assert await _get_plug_and_charge_card_uid() == uid
+        # Set the original card as plug_and_charge_card
+        await connected_client.set_plug_and_charge_charge_card(evse_id=evse_id, uid=before_card)
+        assert await _get_plug_and_charge_card_uid() == before_card
+
+    @mark.asyncio
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
+    async def test_set_invalid_plug_and_charge_card(self, connected_client: BlueCurrentClient, evse_id: str):
+        settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+        with raises(BlueCurrentException):
+            await connected_client.set_plug_and_charge_charge_card(evse_id=evse_id, uid="INVALID_CARD")
+        assert await connected_client.get_charge_point_settings(evse_id=evse_id) == settings
+
+    @mark.asyncio
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
     async def test_set_status(self, connected_client: BlueCurrentClient, evse_id: str):
         before_status = connected_client.get_charge_point_status(evse_id=evse_id)
         if before_status["activity"] != "available":

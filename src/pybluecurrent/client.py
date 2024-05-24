@@ -102,7 +102,7 @@ class BlueCurrentClient:
         Get a list of your charge points.
 
         Returns:
-            A list of dictionaries, each representing a charge card:
+            A list of dictionaries, each representing a charge point:
             {
                 "evse_id": "BCU123456",
                 "name": "",
@@ -133,7 +133,7 @@ class BlueCurrentClient:
         await self._send(dict(command="GET_CHARGE_POINTS"), token=True)
         return (await self._receive("CHARGE_POINTS"))["data"]
 
-    async def get_charge_point_settings(self, evse_id: str) -> dict[str, bool | dict | str]:
+    async def get_charge_point_settings(self, evse_id: str) -> dict[str, bool | dict[str, Any] | str]:
         """
         Get the settings of a charge point.
 
@@ -205,6 +205,21 @@ class BlueCurrentClient:
         result = await self._receive("SUSTAINABILITY_STATUS")
         result.pop("object")
         return result
+
+    async def set_plug_and_charge_charge_card(self, evse_id: str, uid: str | None = None) -> None:
+        """
+        Set a plug-and-charge charge card for the charge point.
+
+        Args:
+            evse_id: A charge point ID.
+            uid: A charge card UID or None (for no charge card). Defaults to None.
+        """
+        await self._send(
+            dict(command="SET_PLUG_AND_CHARGE_CHARGE_CARD", evse_id=evse_id, token_uid=uid or "BCU-APP"), token=True
+        )
+        result = await self._receive("STATUS_SET_PLUG_AND_CHARGE_CHARGE_CARD")
+        if not result.get("success"):
+            raise BlueCurrentException(result)
 
     async def set_status(self, evse_id: str, enabled: bool) -> None:
         """
