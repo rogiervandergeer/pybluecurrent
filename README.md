@@ -33,6 +33,7 @@ As a result, the `BlueCurrentClient` also exposes synchronous as well as asynchr
    - [`get_charge_point_settings`](#getchargepointsettings---get-the-settings-of-a-charge-point)
    - [`get_grid_status`](#getgridstatus---get-the-grid-status-associated-to-a-charge-point)
    - [`get_sustainability_status`](#getsustainabilitystatus---get-statistics-on-the-sustainability-of-all-your-charge-points)
+   - [`set_plug_and_charge_charge_card`](#setplugandchargechargecard---set-the-charge-card-for-plug-and-charge)
    - [`set_status`](#setstatus---enable-or-disable-a-charge-point)
  - [Synchronous](#synchronous)
    - [`login`](#login---log-in)
@@ -141,7 +142,7 @@ All the information returned by this endpoint is already included
 in the response of [`get_charge_points`](#getchargepoints---get-your-charge-points).
 
 ```python
-async def get_charge_point_settings(self, evse_id: str) -> dict[str, bool | dict | str]
+async def get_charge_point_settings(self, evse_id: str) -> dict[str, bool | dict[str, Any] | str]
 ```
 
 ##### Arguments
@@ -201,6 +202,14 @@ async def get_sustainability_status(self) -> dict[str, float | int]
 
 ##### Returns
 A dictionary with two keys: `{"trees": 1, "co2": 12.345}`
+
+#### `set_plug_and_charge_charge_card` - Set the charge card for plug-and-charge
+
+```python
+async def set_plug_and_charge_charge_card(self, evse_id: str, uid: str | None = None) -> None
+```
+
+Sets the plug-and-charge card for the charge point. The uid must be a `uid` of one of your charge cards (see [`get_charge_cards`](#getchargecards---get-your-charge-cards)) or `None` to use no charge card.
 
 #### `set_status` - Enable or disable a charge point.
 
