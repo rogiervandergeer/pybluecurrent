@@ -212,10 +212,17 @@ class BlueCurrentClient:
 
         Args:
             evse_id: A charge point ID.
-            uid: A charge card UID or None (for no charge card). Defaults to None.
+            uid: A charge card UID or None. Defaults to None.
+                Setting the plug-and-charge card to None will result in plug-and-charge
+                transactions being started without a charge card. Note that the
+                charge point status will show "BCU_HOME_USE" as the charge card.
+                Setting the plug-and-charge card to "BCU_HOME_USE" has the same effect
+                as setting it to None.
         """
+        token_uid = "BCU-APP" if uid is None or uid == "BCU_HOME_USE" else uid
         await self._send(
-            dict(command="SET_PLUG_AND_CHARGE_CHARGE_CARD", evse_id=evse_id, token_uid=uid or "BCU-APP"), token=True
+            dict(command="SET_PLUG_AND_CHARGE_CHARGE_CARD", evse_id=evse_id, token_uid=token_uid),
+            token=True,
         )
         result = await self._receive("STATUS_SET_PLUG_AND_CHARGE_CHARGE_CARD")
         if not result.get("success"):
