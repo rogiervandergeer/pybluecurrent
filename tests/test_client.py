@@ -115,7 +115,7 @@ class TestSocketApi:
         charge_cards = await connected_client.get_charge_cards()
         if len(charge_cards) == 0:
             skip(reason="No charge cards.")
-        uids: list[str | None] = [charge_card["uid"] for charge_card in charge_cards] + [None]  # type: ignore
+        uids: list[str | None] = [charge_card["uid"] for charge_card in charge_cards] + ["BCU_HOME_USE"]  # type: ignore
         # Set each card as plug_and_charge_card
         for uid in uids:
             if uid != before_card:
