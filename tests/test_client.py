@@ -17,12 +17,10 @@ class TestHeaders:
 
 
 class TestAuthentication:
-    @mark.asyncio
     async def test_authenticate(self, client_with_auth: BlueCurrentClient):
         async with client_with_auth:
             assert client_with_auth.token is not None
 
-    @mark.asyncio
     async def test_authentication_failed(self, client: BlueCurrentClient):
         with raises(AuthenticationFailed):
             async with client:
@@ -34,13 +32,11 @@ class TestAuthentication:
 
 
 class TestSocketApi:
-    @mark.asyncio
     async def test_get_account(self, connected_client: BlueCurrentClient):
         account = await connected_client.get_account()
         assert "full_name" in account
         assert isinstance(account["first_login_app"], date)
 
-    @mark.asyncio
     async def test_get_charge_cards(self, connected_client: BlueCurrentClient):
         charge_cards = await connected_client.get_charge_cards()
         if len(charge_cards) == 0:
@@ -56,7 +52,6 @@ class TestSocketApi:
             ]
         )
 
-    @mark.asyncio
     async def test_get_charge_points(self, connected_client: BlueCurrentClient):
         charge_points = await connected_client.get_charge_points()
         if len(charge_points) == 0:
@@ -64,41 +59,34 @@ class TestSocketApi:
         for charge_point in charge_points:
             assert "evse_id" in charge_point
 
-    @mark.asyncio
     async def test_get_grid_status(self, connected_client: BlueCurrentClient, evse_id: str):
         status = await connected_client.get_grid_status(evse_id=evse_id)
         assert "grid_actual_p1" in status
         assert "id" in status
 
-    @mark.asyncio
     async def test_get_charge_point_settings(self, connected_client: BlueCurrentClient, evse_id: str):
         settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
         assert isinstance(settings, dict)
         assert settings["evse_id"] == evse_id
 
-    @mark.asyncio
     @mark.skip("Does not work")
     async def test_get_sessions(self, connected_client: BlueCurrentClient, evse_id: str):
         sessions = await connected_client.get_sessions(evse_id=evse_id)
         print(sessions)
 
-    @mark.asyncio
     async def test_get_sustainability_status(self, connected_client: BlueCurrentClient):
         sessions = await connected_client.get_sustainability_status()
         assert set(sessions.keys()) == {"trees", "co2"}
 
-    @mark.asyncio
     @mark.skip("Does not work.")
     async def test_unlock_connector(self, connected_client: BlueCurrentClient, evse_id: str):
         result = await connected_client.unlock_connector(evse_id=evse_id)
         print(result)
 
-    @mark.asyncio
     @mark.skip("Do not change chargepoint status.")
     async def test_soft_reset(self, connected_client: BlueCurrentClient, evse_id: str):
         _ = await connected_client.soft_reset(evse_id=evse_id)
 
-    @mark.asyncio
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
     async def test_set_plug_and_charge_card(self, connected_client: BlueCurrentClient, evse_id: str):
         async def _get_plug_and_charge_card_uid() -> str | None:
@@ -125,7 +113,6 @@ class TestSocketApi:
         await connected_client.set_plug_and_charge_charge_card(evse_id=evse_id, uid=before_card)
         assert await _get_plug_and_charge_card_uid() == before_card
 
-    @mark.asyncio
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
     async def test_set_invalid_plug_and_charge_card(self, connected_client: BlueCurrentClient, evse_id: str):
         settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
@@ -133,7 +120,6 @@ class TestSocketApi:
             await connected_client.set_plug_and_charge_charge_card(evse_id=evse_id, uid="INVALID_CARD")
         assert await connected_client.get_charge_point_settings(evse_id=evse_id) == settings
 
-    @mark.asyncio
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
     async def test_set_status(self, connected_client: BlueCurrentClient, evse_id: str):
         before_status = connected_client.get_charge_point_status(evse_id=evse_id)
@@ -144,7 +130,6 @@ class TestSocketApi:
         await connected_client.set_status(evse_id=evse_id, enabled=True)
         assert connected_client.get_charge_point_status(evse_id=evse_id)["activity"] == "available"
 
-    @mark.asyncio
     async def test_error(self, connected_client: BlueCurrentClient):
         with raises(BlueCurrentException) as e:
             await connected_client.set_status("BCU123456", False)

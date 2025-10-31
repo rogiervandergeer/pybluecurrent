@@ -32,7 +32,7 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
-dev = ["black==23.3.0", "pre-commit>=3.3.3", "pytest==8.1.2", "pytest-asyncio==0.21.1"]
+dev = ["black==23.3.0", "pre-commit>=3.3.3", "pytest==8.4.2", "pytest-asyncio==1.2.0"]
 
 [project.urls]
 Repository = "https://github.com/rogiervandergeer/pybluecurrent"
@@ -53,3 +53,8 @@ profile = "black"
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
