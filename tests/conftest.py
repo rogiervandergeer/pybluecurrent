@@ -35,4 +35,4 @@ async def evse_id(connected_client: BlueCurrentClient) -> str:
     charge_points = await connected_client.get_charge_points()
     if not charge_points:
         skip("No charge points available.")
-    return charge_points[0]["evse_id"]
+    return charge_points[0]["evse_id"]  # type: ignore
