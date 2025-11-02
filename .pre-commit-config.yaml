@@ -1,7 +1,7 @@
 fail_fast: true
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v3.2.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
         exclude: '\.(md|markdown)$'
@@ -27,7 +27,7 @@ repos:
       - id: isort
         exclude: __init__.py
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: 6e63c9e
+    rev: v1.18.2
     hooks:
     -   id: mypy
         additional_dependencies:
