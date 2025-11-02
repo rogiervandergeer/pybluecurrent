@@ -8,7 +8,7 @@ from uuid import uuid4
 from asyncio_multisubscriber_queue import MultisubscriberQueue
 from requests import get, post
 from sjcl import SJCL
-from websockets import WebSocketClientProtocol, connect
+from websockets.asyncio.client import ClientConnection, connect
 
 from pybluecurrent._version import __version__
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
@@ -25,7 +25,7 @@ class BlueCurrentClient:
         self.credentials: tuple[str, str] = (username, password)
         self.logger = getLogger("BlueCurrentClient")
         self.queue = MultisubscriberQueue()
-        self.socket: WebSocketClientProtocol | None = None
+        self.socket: ClientConnection | None = None
         self.token: str | None = None
 
     ## Asynchronous API ##
