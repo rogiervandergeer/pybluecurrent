@@ -1,12 +1,12 @@
-from asyncio import Task, create_task, run, wait_for
+from asyncio import Task, create_task, wait_for
 from datetime import date, datetime
 from json import dumps, loads
 from logging import getLogger
-from typing import Any, Iterable
+from typing import Any, AsyncIterable
 from uuid import uuid4
 
 from asyncio_multisubscriber_queue import MultisubscriberQueue
-from requests import get, post
+from httpx import AsyncClient
 from sjcl import SJCL
 from websockets import WebSocketClientProtocol, connect
 
@@ -24,17 +24,18 @@ class BlueCurrentClient:
         self.consumer: Task | None = None
         self.credentials: tuple[str, str] = (username, password)
         self.logger = getLogger("BlueCurrentClient")
+        self.httpx_client: AsyncClient | None = None
         self.queue = MultisubscriberQueue()
         self.socket: WebSocketClientProtocol | None = None
         self.token: str | None = None
-
-    ## Asynchronous API ##
 
     async def __aenter__(self) -> "BlueCurrentClient":
         self.logger.debug("Creating BlueCurrent websocket connection")
         self.connection = connect(self.socket_url, user_agent_header=self._user_agent)
         self.socket = await self.connection.__aenter__()
         self.consumer = create_task(self._handler())
+        self.httpx_client = AsyncClient()
+        await self.httpx_client.__aenter__()
         if self.token is None:
             await self._login()
         await self._hello()
@@ -44,7 +45,8 @@ class BlueCurrentClient:
         self.logger.debug("Closing BlueCurrent connection")
         self.consumer.cancel()
         await self.connection.__aexit__(exc_type, exc_val, exc_tb)
-        self.consumer, self.socket = None, None
+        await self.httpx_client.__aexit__(exc_type, exc_val, exc_tb)
+        self.consumer, self.socket, self.httpx_client = None, None, None
 
     async def get_account(self) -> dict[str, bool | date | str]:
         """
@@ -263,25 +265,7 @@ class BlueCurrentClient:
         await self._receive("RECEIVED_SOFT_RESET")
         return await self._receive("STATUS_SOFT_RESET", timeout=30)
 
-    ## Synchronous API ##
-
-    def login(self) -> None:
-        """
-        Retrieves a connection token.
-
-        This method does not do anything if the client is already logged in.
-        Connection to the websocket api (async with client) automatically logs in the client,
-        so this endpoint is not needed when using the async API.
-        """
-
-        async def _login(client: BlueCurrentClient) -> None:
-            async with client:
-                pass
-
-        if self.token is None:
-            run(_login(self))
-
-    def get_charge_point_status(self, evse_id: str) -> dict[str, datetime | float | int | str | None]:
+    async def get_charge_point_status(self, evse_id: str) -> dict[str, datetime | float | int | str | None]:
         """
         Get the status of a charge point.
 
@@ -307,7 +291,9 @@ class BlueCurrentClient:
                 "evse_id": "BCU123456",
             }
         """
-        response = get(
+        if self.httpx_client is None:
+            raise RuntimeError(f"{self.__class__.__name__} is not connected.")
+        response = await self.httpx_client.get(
             f"{self.api_url}/chargepointstatus?evse_id={evse_id}",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
         )
@@ -321,7 +307,7 @@ class BlueCurrentClient:
             },
         )
 
-    def get_contracts(self) -> list[dict[str, str]]:
+    async def get_contracts(self) -> list[dict[str, str]]:
         """
         Get your contracts.
 
@@ -337,14 +323,16 @@ class BlueCurrentClient:
                 }
             ]
         """
-        response = get(
+        if self.httpx_client is None:
+            raise RuntimeError(f"{self.__class__.__name__} is not connected.")
+        response = await self.httpx_client.get(
             f"{self.api_url}/getcontracts",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
         )
         response.raise_for_status()
         return response.json()["contracts"]
 
-    def get_grids(self) -> list[dict[str, bool | dict[str, str] | str]]:
+    async def get_grids(self) -> list[dict[str, bool | dict[str, str] | str]]:
         """
         Get your grid connections.
 
@@ -359,14 +347,16 @@ class BlueCurrentClient:
                 }
             ]
         """
-        response = get(
+        if self.httpx_client is None:
+            raise RuntimeError(f"{self.__class__.__name__} is not connected.")
+        response = await self.httpx_client.get(
             f"{self.api_url}/getgrids",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
         )
         response.raise_for_status()
         return response.json()["grids"]
 
-    def get_transactions(
+    async def get_transactions(
         self, evse_id: str, newest_first: bool = True, page: int = 1
     ) -> dict[str, int | list[dict[str, Any]]]:
         """
@@ -405,13 +395,15 @@ class BlueCurrentClient:
             }
 
         """
-        response = post(
+        if self.httpx_client is None:
+            raise RuntimeError(f"{self.__class__.__name__} is not connected.")
+        response = await self.httpx_client.post(
             f"{self.api_url}/gettransactions?"
             f"page={page}&"
             f"sort_field_order={'DESC' if newest_first else 'ASC'}&"
             f"sort_field=stoppedtimestamp",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
-            data=dumps({"chargepoints": [{"chargepoint_id": evse_id}]}).encode("UTF-8"),
+            data=dumps({"chargepoints": [{"chargepoint_id": evse_id}]}),
         )
         response.raise_for_status()
         result = response.json()["data"]
@@ -421,7 +413,7 @@ class BlueCurrentClient:
         )
         return result
 
-    def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> Iterable[dict[str, Any]]:
+    async def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> AsyncIterable[dict[str, Any]]:
         """
         Iterate through your transactions.
 
@@ -450,8 +442,9 @@ class BlueCurrentClient:
         """
         next_page = 1
         while next_page is not None:
-            transactions = self.get_transactions(evse_id=evse_id, newest_first=newest_first, page=next_page)
-            yield from transactions["transactions"]  # type: ignore
+            transactions = await self.get_transactions(evse_id=evse_id, newest_first=newest_first, page=next_page)
+            for tx in transactions["transactions"]:  # type: ignore
+                yield tx
             next_page = transactions["next_page"]  # type: ignore
 
     async def _login(self) -> None:
