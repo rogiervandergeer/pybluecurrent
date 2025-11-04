@@ -16,36 +16,32 @@ from pybluecurrent import BlueCurrentClient
 client = BlueCurrentClient("your_username", "your_secret_password")
 
 async with client:
-   charge_points = await client.get_charge_points()
-
-transactions = client.get_transactions(charge_points[0]["evse_id"])
+    charge_points = await client.get_charge_points()
+    transactions = await client.get_transactions(charge_points[0]["evse_id"])
 ```
 
 ## Methods
 
-BlueCurrent exposes two APIs, a synchronous REST API as well as an asynchronous Websocket API. 
-As a result, the `BlueCurrentClient` also exposes synchronous as well as asynchronous methods:
+The `BlueCurrentClient` exposes the following methods:
   
- - [Asynchronous](#asynchronous)
-   - [`get_account`](#getaccount---get-your-account-information)
-   - [`get_charge_cards`](#getchargecards---get-your-charge-cards)
-   - [`get_charge_points`](#getchargepoints---get-your-charge-points)
-   - [`get_charge_point_settings`](#getchargepointsettings---get-the-settings-of-a-charge-point)
-   - [`get_grid_status`](#getgridstatus---get-the-grid-status-associated-to-a-charge-point)
-   - [`get_sustainability_status`](#getsustainabilitystatus---get-statistics-on-the-sustainability-of-all-your-charge-points)
-   - [`set_plug_and_charge_charge_card`](#setplugandchargechargecard---set-the-charge-card-for-plug-and-charge)
-   - [`set_status`](#setstatus---enable-or-disable-a-charge-point)
- - [Synchronous](#synchronous)
-   - [`login`](#login---log-in)
-   - [`get_charge_point_status`](#getchargepointstatus---get-the-status-of-a-charge-point)
-   - [`get_contracts`](#getcontracts---get-your-contracts)
-   - [`get_grids`](#getgrids---get-your-grid-connections)
-   - [`get_transactions`](#gettransactions---get-a-list-of-transactions)
-   - [`iterate_transactions`](#iteratetransactions---iterate-through-your-transactions)
+- [`get_account`](#getaccount---get-your-account-information)
+- [`get_charge_cards`](#getchargecards---get-your-charge-cards)
+- [`get_charge_points`](#getchargepoints---get-your-charge-points)
+- [`get_charge_point_settings`](#getchargepointsettings---get-the-settings-of-a-charge-point)
+- [`get_grid_status`](#getgridstatus---get-the-grid-status-associated-to-a-charge-point)
+- [`get_sustainability_status`](#getsustainabilitystatus---get-statistics-on-the-sustainability-of-all-your-charge-points)
+- [`set_plug_and_charge_charge_card`](#setplugandchargechargecard---set-the-charge-card-for-plug-and-charge)
+- [`set_status`](#setstatus---enable-or-disable-a-charge-point)
+- [`login`](#login---log-in)
+- [`get_charge_point_status`](#getchargepointstatus---get-the-status-of-a-charge-point)
+- [`get_contracts`](#getcontracts---get-your-contracts)
+- [`get_grids`](#getgrids---get-your-grid-connections)
+- [`get_transactions`](#gettransactions---get-a-list-of-transactions)
+- [`iterate_transactions`](#iteratetransactions---iterate-through-your-transactions)
 
-### Asynchronous
+### Connection
 
-The async methods can only be used when the websocket client is connected. For example:
+The client can only be used when the websocket client is connected. For example:
 ```python
 client = BlueCurrentClient("your_username", "your_secret_password")
 async with client:
@@ -221,22 +217,10 @@ async def set_status(self, evse_id: str, enabled: bool) -> None
 - `evse_id`: The ID of the charge point.
 - `enabled`: Boolean that indicates the desired status.
 
-### Synchronous
-
-#### `login` - Log in
-```python
-def login(self) -> None
-```
-
-This method does not do anything if the client is already logged in. 
-Connection to the websocket api (async with client) automatically logs in the client,
-so this endpoint is not needed when using the async API.
-
-
 #### `get_charge_point_status` - Get the status of a charge point.
 
 ```python
-def get_charge_point_status(self, evse_id: str) -> dict[str, datetime | float | int | str | None]
+async def get_charge_point_status(self, evse_id: str) -> dict[str, datetime | float | int | str | None]
 ```
 
 ##### Arguments
@@ -269,7 +253,7 @@ A dictionary with the chargepoint status:
 #### `get_contracts` - Get your contracts.
 
 ```python
-def get_contracts(self) -> list[dict[str, str]]
+async def get_contracts(self) -> list[dict[str, str]]
 ```
 
 ##### Returns
@@ -289,7 +273,7 @@ A list of dictionaries, each representing a contract:
 #### `get_grids` - Get your grid connections.
 
 ```python
-def get_grids(self) -> list[dict[str, bool | dict[str, str] | str]]
+async def get_grids(self) -> list[dict[str, bool | dict[str, str] | str]]
 ```
 
 ##### Returns
@@ -308,7 +292,7 @@ A list of dictionaries, each representing a grid:
 #### `get_transactions` - Get a list of transactions.
 
 ```python
-def get_transactions(
+async def get_transactions(
         self, evse_id: str, newest_first: bool = True, page: int = 1
     ) -> dict[str, int | list[dict[str, Any]]]
 ```
@@ -350,7 +334,7 @@ A dictionary like this:
 #### `iterate_transactions` - Iterate through your transactions
 
 ```python
-def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> Iterable[dict[str, Any]]
+async def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> AsyncIterable[dict[str, Any]]
 ```
 
 ##### Arguments
