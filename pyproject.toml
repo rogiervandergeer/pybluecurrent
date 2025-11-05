@@ -21,13 +21,13 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Typing :: Typed"
+    "Typing :: Typed",
 ]
 dependencies = [
     "asyncio-multisubscriber-queue>=0.4.1",
     "httpx>=0.28",
     "sjcl>=0.2.1",
-    "websockets>=11.0.3",
+    "websockets>=14.0",
 ]
 dynamic = ["version"]
 
