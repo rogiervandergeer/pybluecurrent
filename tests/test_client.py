@@ -1,8 +1,7 @@
 from datetime import date
-from itertools import islice
 from os import environ
 
-from pytest import fixture, mark, raises, skip
+from pytest import mark, raises, skip
 
 from pybluecurrent import BlueCurrentClient
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
@@ -25,10 +24,6 @@ class TestAuthentication:
         with raises(AuthenticationFailed):
             async with client:
                 pass
-
-    def test_login(self, client_with_auth: BlueCurrentClient):
-        client_with_auth.login()
-        assert client_with_auth.token is not None
 
 
 class TestSocketApi:
@@ -122,13 +117,13 @@ class TestSocketApi:
 
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
     async def test_set_status(self, connected_client: BlueCurrentClient, evse_id: str):
-        before_status = connected_client.get_charge_point_status(evse_id=evse_id)
+        before_status = await connected_client.get_charge_point_status(evse_id=evse_id)
         if before_status["activity"] != "available":
             skip(reason="Only perform this test if the charge point is available.")
         await connected_client.set_status(evse_id=evse_id, enabled=False)
-        assert connected_client.get_charge_point_status(evse_id=evse_id)["activity"] == "unavailable"
+        assert (await connected_client.get_charge_point_status(evse_id=evse_id))["activity"] == "unavailable"
         await connected_client.set_status(evse_id=evse_id, enabled=True)
-        assert connected_client.get_charge_point_status(evse_id=evse_id)["activity"] == "available"
+        assert (await connected_client.get_charge_point_status(evse_id=evse_id))["activity"] == "available"
 
     async def test_error(self, connected_client: BlueCurrentClient):
         with raises(BlueCurrentException) as e:
@@ -137,33 +132,36 @@ class TestSocketApi:
 
 
 class TestRestApi:
-    @fixture(scope="class")
-    def authenticated_client(self, client_with_auth: BlueCurrentClient) -> BlueCurrentClient:
-        client_with_auth.login()
-        return client_with_auth
-
-    def test_get_contracts(self, authenticated_client: BlueCurrentClient):
-        contracts = authenticated_client.get_contracts()
+    async def test_get_contracts(self, connected_client: BlueCurrentClient):
+        contracts = await connected_client.get_contracts()
         assert len(contracts) > 0
         assert "contract_id" in contracts[0]
 
-    def test_get_charge_point_status(self, authenticated_client: BlueCurrentClient, evse_id: str):
-        status = authenticated_client.get_charge_point_status(evse_id)
+    async def test_get_charge_point_status(self, connected_client: BlueCurrentClient, evse_id: str):
+        status = await connected_client.get_charge_point_status(evse_id)
         assert status["evse_id"] == evse_id
         assert "activity" in status
 
-    def test_get_grids(self, authenticated_client: BlueCurrentClient):
-        grids = authenticated_client.get_grids()
+    async def test_get_grids(self, connected_client: BlueCurrentClient):
+        grids = await connected_client.get_grids()
         assert len(grids) > 0
         assert "id" in grids[0]
 
-    def test_get_transactions(self, authenticated_client: BlueCurrentClient, evse_id: str):
-        transactions = authenticated_client.get_transactions(evse_id)
+    async def test_get_transactions(self, connected_client: BlueCurrentClient, evse_id: str):
+        transactions = await connected_client.get_transactions(evse_id)
         assert "transactions" in transactions
 
-    def test_iterate_transactions(self, authenticated_client: BlueCurrentClient, evse_id: str):
-        transactions = authenticated_client.get_transactions(evse_id)
-        # If there are less than three pages, there might be less than 30.
+    async def test_iterate_transactions(self, connected_client: BlueCurrentClient, evse_id: str):
+        transactions = await connected_client.get_transactions(evse_id)
+        # If there are less than three pages, there might be fewer than 30.
         if transactions["total_pages"] < 3:  # type: ignore
             skip("Not enough transactions.")
-        assert len({t["transaction_id"] for t in islice(authenticated_client.iterate_transactions(evse_id), 30)}) == 30
+        n_transactions = 0
+        # Verify pagination works correctly - we get 30 unique transactions from multiple pages.
+        unique_transactions = set()
+        async for transaction in connected_client.iterate_transactions(evse_id):
+            n_transactions += 1
+            unique_transactions.add(transaction["transaction_id"])
+            if n_transactions >= 30:
+                break
+        assert len(unique_transactions) == 30
