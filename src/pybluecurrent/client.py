@@ -405,7 +405,7 @@ class BlueCurrentClient:
             f"sort_field_order={'DESC' if newest_first else 'ASC'}&"
             f"sort_field=stoppedtimestamp",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
-            data=dumps({"chargepoints": [{"chargepoint_id": evse_id}]}),
+            content=dumps({"chargepoints": [{"chargepoint_id": evse_id}]}),
         )
         response.raise_for_status()
         result = response.json()["data"]
