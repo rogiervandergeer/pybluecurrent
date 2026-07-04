@@ -2,13 +2,17 @@ from datetime import datetime
 from typing import Any
 
 
-def parse_datetime_keys(source: dict[str, Any], formats: dict[str, tuple[str, bool]]) -> dict[str, Any]:
+def parse_datetime_keys(
+    source: dict[str, Any], formats: dict[str, tuple[str | tuple[str, ...], bool]]
+) -> dict[str, Any]:
     """
     Parse date(time) keys in a dictionary.
 
     Args:
         source: The dictionary to parse datetimes in.
-        formats: Expected date(time) formats: a dictionary
+        formats: Expected date(time) formats: a dictionary mapping each key to a
+            (format, is_date) tuple. The format may be a single strptime format string,
+            or a tuple of format strings that are tried in order until one parses.
 
     Returns:
         The source dictionary, where keys matching any of the formats have been parsed to datetimes.
@@ -24,13 +28,24 @@ def parse_datetime_keys(source: dict[str, Any], formats: dict[str, tuple[str, bo
             if source[key] == "":
                 source[key] = None
             else:
-                result = datetime.strptime(source[key], datetime_format)
+                result = _parse_datetime(source[key], datetime_format)
                 source[key] = result.date() if is_date else result
     return source
 
 
+def _parse_datetime(value: str, datetime_format: str | tuple[str, ...]) -> datetime:
+    """Parse value with the first matching format (a single format, or several tried in order)."""
+    candidates = (datetime_format,) if isinstance(datetime_format, str) else datetime_format
+    for candidate in candidates:
+        try:
+            return datetime.strptime(value, candidate)
+        except ValueError:
+            continue
+    raise ValueError(f"time data {value!r} does not match any of {candidates!r}")
+
+
 def parse_list_datetime_keys(
-    source: list[dict[str, Any]], formats: dict[str, tuple[str, bool]]
+    source: list[dict[str, Any]], formats: dict[str, tuple[str | tuple[str, ...], bool]]
 ) -> list[dict[str, Any]]:
     """Apply parse_datetime_keys on all elements in a list."""
     return [parse_datetime_keys(s, formats) for s in source]

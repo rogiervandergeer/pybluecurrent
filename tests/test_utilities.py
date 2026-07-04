@@ -1,5 +1,7 @@
 from datetime import date, datetime
 
+from pytest import raises
+
 from pybluecurrent.utilities import parse_datetime_keys, parse_list_datetime_keys
 
 
@@ -27,6 +29,16 @@ class TestParseDateTimeKeys:
         source = {"a": "", "b": ""}
         result = parse_datetime_keys(source, formats={"a": ("%Y-%m-%d", True)})
         assert result == {"a": None, "b": ""}
+
+    def test_multiple_formats(self):
+        # first_login_app was returned as "01-JAN-20" and is now returned as ISO "2020-01-15T13:33:52".
+        formats = {"a": (("%d-%b-%y", "%Y-%m-%dT%H:%M:%S"), False)}
+        assert parse_datetime_keys({"a": "01-JAN-20"}, formats) == {"a": datetime(2020, 1, 1)}
+        assert parse_datetime_keys({"a": "2020-01-15T13:33:52"}, formats) == {"a": datetime(2020, 1, 15, 13, 33, 52)}
+
+    def test_no_matching_format(self):
+        with raises(ValueError):
+            parse_datetime_keys({"a": "not a date"}, formats={"a": (("%d-%b-%y", "%Y-%m-%dT%H:%M:%S"), True)})
 
 
 class TestParseListDateTimeKeys:
