@@ -50,7 +50,7 @@ class BlueCurrentClient:
             await self.httpx_client.__aexit__(exc_type, exc_val, exc_tb)
         self.consumer, self.socket, self.httpx_client = None, None, None
 
-    async def get_account(self) -> dict[str, bool | date | str]:
+    async def get_account(self) -> dict[str, bool | datetime | str]:
         """
         Get account information.
 
@@ -64,14 +64,14 @@ class BlueCurrentClient:
                 "developer_mode_enabled": False,
                 "tel": "",
                 "marketing_target": "bluecurrent",
-                "first_login_app": date(2020, 1, 1),
+                "first_login_app": datetime(2020, 1, 15, 13, 33, 52),
                 "hubspot_user_identity": "a_very_long_string"
             }
         """
         await self._send(dict(command="GET_ACCOUNT"), token=True)
         result = await self._receive("ACCOUNT")
         del result["object"]
-        return parse_datetime_keys(result, formats={"first_login_app": (("%d-%b-%y", "%Y-%m-%dT%H:%M:%S"), True)})
+        return parse_datetime_keys(result, formats={"first_login_app": (("%d-%b-%y", "%Y-%m-%dT%H:%M:%S"), False)})
 
     async def get_charge_cards(self) -> list[dict[str, date | int | str | None]]:
         """
