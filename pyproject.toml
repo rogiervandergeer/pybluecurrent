@@ -50,6 +50,9 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
+[tool.ty.src]
+include = ["src"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
