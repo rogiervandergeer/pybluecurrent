@@ -43,9 +43,11 @@ class BlueCurrentClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self.logger.debug("Closing BlueCurrent connection")
-        self.consumer.cancel()
+        if self.consumer is not None:
+            self.consumer.cancel()
         await self.connection.__aexit__(exc_type, exc_val, exc_tb)
-        await self.httpx_client.__aexit__(exc_type, exc_val, exc_tb)
+        if self.httpx_client is not None:
+            await self.httpx_client.__aexit__(exc_type, exc_val, exc_tb)
         self.consumer, self.socket, self.httpx_client = None, None, None
 
     async def get_account(self) -> dict[str, bool | date | str]:
