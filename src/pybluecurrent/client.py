@@ -43,9 +43,11 @@ class BlueCurrentClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self.logger.debug("Closing BlueCurrent connection")
-        self.consumer.cancel()
+        if self.consumer is not None:
+            self.consumer.cancel()
         await self.connection.__aexit__(exc_type, exc_val, exc_tb)
-        await self.httpx_client.__aexit__(exc_type, exc_val, exc_tb)
+        if self.httpx_client is not None:
+            await self.httpx_client.__aexit__(exc_type, exc_val, exc_tb)
         self.consumer, self.socket, self.httpx_client = None, None, None
 
     async def get_account(self) -> dict[str, bool | date | str]:
@@ -356,9 +358,7 @@ class BlueCurrentClient:
         response.raise_for_status()
         return response.json()["grids"]
 
-    async def get_transactions(
-        self, evse_id: str, newest_first: bool = True, page: int = 1
-    ) -> dict[str, int | list[dict[str, Any]]]:
+    async def get_transactions(self, evse_id: str, newest_first: bool = True, page: int = 1) -> dict[str, Any]:
         """
         Get a list of transactions.
 
@@ -403,7 +403,7 @@ class BlueCurrentClient:
             f"sort_field_order={'DESC' if newest_first else 'ASC'}&"
             f"sort_field=stoppedtimestamp",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
-            data=dumps({"chargepoints": [{"chargepoint_id": evse_id}]}),
+            content=dumps({"chargepoints": [{"chargepoint_id": evse_id}]}),
         )
         response.raise_for_status()
         result = response.json()["data"]
@@ -443,9 +443,9 @@ class BlueCurrentClient:
         next_page = 1
         while next_page is not None:
             transactions = await self.get_transactions(evse_id=evse_id, newest_first=newest_first, page=next_page)
-            for tx in transactions["transactions"]:  # type: ignore
+            for tx in transactions["transactions"]:
                 yield tx
-            next_page = transactions["next_page"]  # type: ignore
+            next_page = transactions["next_page"]
 
     async def _login(self) -> None:
         await self._send(
