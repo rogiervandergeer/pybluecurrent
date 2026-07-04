@@ -71,7 +71,7 @@ class BlueCurrentClient:
         await self._send(dict(command="GET_ACCOUNT"), token=True)
         result = await self._receive("ACCOUNT")
         del result["object"]
-        return parse_datetime_keys(result, formats={"first_login_app": ("%d-%b-%y", True)})
+        return parse_datetime_keys(result, formats={"first_login_app": (("%d-%b-%y", "%Y-%m-%dT%H:%M:%S"), True)})
 
     async def get_charge_cards(self) -> list[dict[str, date | int | str | None]]:
         """
