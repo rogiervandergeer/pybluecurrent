@@ -7,6 +7,10 @@ This project is pre-1.0: breaking changes may land in minor releases.
 
 ## [Unreleased]
 
+### Changed
+
+- REST calls now use `api.bluecurrent.nl` instead of the legacy `bo.bluecurrent.nl` backoffice host (same `bc_api` v2.0 API and response shapes).
+
 ## [0.1.1] - 2026-07-04
 
 ### Fixed

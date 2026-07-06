@@ -16,7 +16,7 @@ from pybluecurrent.utilities import parse_datetime_keys, parse_list_datetime_key
 
 
 class BlueCurrentClient:
-    api_url: str = "https://bo.bluecurrent.nl/app/bc_api/api/v2.0"
+    api_url: str = "https://api.bluecurrent.nl/app/bc_api/api/v2.0"
     psk: str = "d9ab2352a935be4ade182ce4921044f8"
     socket_url: str = "wss://motown.bluecurrent.nl/appserver/2.0"
 
