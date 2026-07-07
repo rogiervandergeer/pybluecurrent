@@ -25,6 +25,8 @@ async with client:
 The `BlueCurrentClient` exposes the following methods:
   
 - [`get_account`](#getaccount---get-your-account-information)
+- [`get_api_token`](#getapitoken---get-your-api-token)
+- [`generate_api_token`](#generateapitoken---generate-a-new-api-token)
 - [`get_charge_cards`](#getchargecards---get-your-charge-cards)
 - [`get_charge_points`](#getchargepoints---get-your-charge-points)
 - [`get_charge_point_settings`](#getchargepointsettings---get-the-settings-of-a-charge-point)
@@ -49,6 +51,14 @@ async with client:
 ```
 Entering the async context will automatically login.
 
+Instead of a username and password, you can authenticate with an API token:
+```python
+client = BlueCurrentClient(api_token="your_api_token")
+```
+Retrieve or rotate the token with [`get_api_token`](#getapitoken---get-your-api-token) and
+[`generate_api_token`](#generateapitoken---generate-a-new-api-token), or from the
+[BlueCurrent website](https://my.bluecurrent.nl).
+
 #### `get_account` - Get your account information.
 
 ```python
@@ -67,10 +77,28 @@ A dictionary describing your account:
     "developer_mode_enabled": False,
     "tel": "",
     "marketing_target": "bluecurrent",
-    "first_login_app": date(2020, 1, 1),
+    "first_login_app": datetime(2020, 1, 15, 13, 33, 52),
     "hubspot_user_identity": "a_very_long_string"
 }
 ```
+
+#### `get_api_token` - Get your API token.
+
+```python
+async def get_api_token(self) -> str
+```
+
+Returns the API token (home automation key) for your account. This token can be used to authenticate
+instead of a username and password, by constructing the client with `BlueCurrentClient(api_token=...)`.
+
+#### `generate_api_token` - Generate a new API token.
+
+```python
+async def generate_api_token(self) -> str
+```
+
+Generates a new API token and returns it. **Warning:** this rotates the token — any previously issued
+token is invalidated, which will break anything still using the old one (for example a Home Assistant integration).
 
 #### `get_charge_cards` - Get your charge cards.
 
