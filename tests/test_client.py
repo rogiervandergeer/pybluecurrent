@@ -165,3 +165,14 @@ class TestRestApi:
             if n_transactions >= 30:
                 break
         assert len(unique_transactions) == 30
+
+    async def test_get_api_token(self, connected_client: BlueCurrentClient):
+        token = await connected_client.get_api_token()
+        assert isinstance(token, str)
+        assert token
+
+    async def test_api_token_auth(self, connected_client: BlueCurrentClient):
+        token = await connected_client.get_api_token()
+        async with BlueCurrentClient(api_token=token) as token_client:
+            assert isinstance(await token_client.get_charge_points(), list)
+            assert token_client.customer_id is not None

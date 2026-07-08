@@ -20,9 +20,13 @@ class BlueCurrentClient:
     psk: str = "d9ab2352a935be4ade182ce4921044f8"
     socket_url: str = "wss://motown.bluecurrent.nl/appserver/2.0"
 
-    def __init__(self, username: str, password: str):
+    def __init__(self, username: str | None = None, password: str | None = None, api_token: str | None = None):
+        if api_token is None and (username is None or password is None):
+            raise ValueError("Provide either username and password, or api_token.")
         self.consumer: Task | None = None
-        self.credentials: tuple[str, str] = (username, password)
+        self.credentials: tuple[str | None, str | None] = (username, password)
+        self.api_token: str | None = api_token
+        self.customer_id: str | None = None
         self.logger = getLogger("BlueCurrentClient")
         self.httpx_client: AsyncClient | None = None
         self.queue = MultisubscriberQueue()
@@ -72,6 +76,38 @@ class BlueCurrentClient:
         result = await self._receive("ACCOUNT")
         del result["object"]
         return parse_datetime_keys(result, formats={"first_login_app": (("%d-%b-%y", "%Y-%m-%dT%H:%M:%S"), False)})
+
+    async def get_api_token(self) -> str:
+        """
+        Get the API token (home automation key) for your account.
+
+        The token can be used to authenticate instead of a username and password, by constructing
+        the client with ``BlueCurrentClient(api_token=...)``.
+        """
+        if self.httpx_client is None:
+            raise RuntimeError(f"{self.__class__.__name__} is not connected.")
+        response = await self.httpx_client.get(
+            f"{self.api_url}/gethomeautomationkey",
+            headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
+        )
+        response.raise_for_status()
+        return response.json()["key"]
+
+    async def generate_api_token(self) -> str:
+        """
+        Generate a new API token (home automation key) and return it.
+
+        Warning: this rotates the token. Any previously issued token is invalidated, which will
+        break anything still using the old one (for example a Home Assistant integration).
+        """
+        if self.httpx_client is None:
+            raise RuntimeError(f"{self.__class__.__name__} is not connected.")
+        response = await self.httpx_client.post(
+            f"{self.api_url}/generatehomeautomationkey",
+            headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
+        )
+        response.raise_for_status()
+        return await self.get_api_token()
 
     async def get_charge_cards(self) -> list[dict[str, date | int | str | None]]:
         """
@@ -448,6 +484,12 @@ class BlueCurrentClient:
             next_page = transactions["next_page"]
 
     async def _login(self) -> None:
+        if self.api_token is not None:
+            await self._login_with_token()
+        else:
+            await self._login_with_password()
+
+    async def _login_with_password(self) -> None:
         await self._send(
             dict(
                 command="VALIDATE_PASSWORD",
@@ -462,15 +504,28 @@ class BlueCurrentClient:
         self.token = message["token"]
         self.logger.info("Successfully authenticated")
 
+    async def _login_with_token(self) -> None:
+        await self._send(dict(command="VALIDATE_API_TOKEN", token=self.api_token))
+        message = await self._receive("STATUS_API_TOKEN")
+        if not message.get("success"):
+            self.logger.error("Authentication failed")
+            raise AuthenticationFailed(message)
+        self.token = message["token"]
+        self.customer_id = message.get("customer_id")
+        self.logger.info("Successfully authenticated")
+
     async def _hello(self) -> None:
         await self._send(dict(command="HELLO"), token=True)
         await self._receive("HELLO")
 
     def _encrypt_password(self) -> str:
+        password = self.credentials[1]
+        if password is None:
+            raise RuntimeError("No password configured.")
         return dumps(
             {
                 key: (value.decode("utf-8") if isinstance(value, bytes) else value)
-                for key, value in SJCL().encrypt(self.credentials[1].encode("utf-8"), self.psk).items()
+                for key, value in SJCL().encrypt(password.encode("utf-8"), self.psk).items()
             },
             ensure_ascii=False,
         )
