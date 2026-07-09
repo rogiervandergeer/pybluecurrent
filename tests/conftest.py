@@ -1,7 +1,8 @@
 from os import environ
 from typing import AsyncGenerator
 
-from pytest import fixture, skip
+from fake_socket import FakeSocket, make_fake_connect
+from pytest import MonkeyPatch, fixture, skip
 
 from pybluecurrent import BlueCurrentClient
 
@@ -9,6 +10,20 @@ from pybluecurrent import BlueCurrentClient
 @fixture(scope="function")
 def client() -> BlueCurrentClient:
     return BlueCurrentClient("username", "password")
+
+
+@fixture(scope="function")
+def fake_socket() -> FakeSocket:
+    """A fresh offline websocket with the default auth + HELLO handshake scripted."""
+    return FakeSocket()
+
+
+@fixture(scope="function")
+async def offline_client(monkeypatch: MonkeyPatch, fake_socket: FakeSocket) -> AsyncGenerator[BlueCurrentClient, None]:
+    """A connected client backed by ``fake_socket`` — no credentials, no network."""
+    monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
+    async with BlueCurrentClient("username", "password") as client:
+        yield client
 
 
 @fixture(scope="session")

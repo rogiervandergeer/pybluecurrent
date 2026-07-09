@@ -1,0 +1,11 @@
+{
+  "data": {
+    "grid_actual_p1": 1,
+    "grid_actual_p2": 2,
+    "grid_actual_p3": 3,
+    "grid_max_install": 25,
+    "grid_max_reserved": 25,
+    "id": "GRID-BCU123456"
+  },
+  "object": "GRID_STATUS"
+}

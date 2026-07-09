@@ -1,0 +1,50 @@
+{
+  "data": {
+    "chargepoint_type": "HIDDEN",
+    "default_card": {
+      "customer_name": "Your Name",
+      "id": "NL-ABC-123456-0",
+      "name": "Your Card",
+      "uid": "A1B2C3D4E5F6",
+      "valid": 1
+    },
+    "evse_id": "BCU123456",
+    "is_cable": true,
+    "led_intensity": {
+      "permission": "none",
+      "value": 0
+    },
+    "led_interaction": {
+      "permission": "none",
+      "value": false
+    },
+    "model_type": "H:MOVE-C32T2",
+    "plug_and_charge": {
+      "permission": "write",
+      "value": true
+    },
+    "plug_and_charge_card": {
+      "customer_name": "Your Name",
+      "id": "NL-ABC-123456-0",
+      "name": "Your Card",
+      "uid": "A1B2C3D4E5F6",
+      "valid": 1
+    },
+    "plug_and_charge_notification": false,
+    "preferred_card": {
+      "customer_name": "Your Name",
+      "id": "NL-ABC-123456-0",
+      "name": "Your Card",
+      "uid": "A1B2C3D4E5F6",
+      "valid": 1
+    },
+    "public_charging": {
+      "permission": "write",
+      "value": false
+    },
+    "smart_charging": true,
+    "smart_charging_dynamic": true
+  },
+  "evse_id": "BCU123456",
+  "object": "CH_SETTINGS"
+}

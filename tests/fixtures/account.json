@@ -1,0 +1,12 @@
+{
+  "developer_mode_enabled": false,
+  "email": "your@email.address",
+  "first_login_app": "2020-01-15T13:33:52",
+  "full_name": "Your Full Name",
+  "hubspot_user_identity": "a_very_long_string",
+  "login": "your@email.address",
+  "marketing_target": "bluecurrent",
+  "object": "ACCOUNT",
+  "should_reset_password": false,
+  "tel": ""
+}
