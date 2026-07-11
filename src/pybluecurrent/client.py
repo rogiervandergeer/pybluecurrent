@@ -1,9 +1,11 @@
-from asyncio import Task, create_task, wait_for
+from asyncio import Lock, Task, create_task, wait_for
 from asyncio import TimeoutError as AsyncTimeoutError
+from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from json import dumps, loads
 from logging import getLogger
-from typing import Any, AsyncIterable
+from typing import Any, AsyncIterable, AsyncIterator
 from uuid import uuid4
 
 from asyncio_multisubscriber_queue import MultisubscriberQueue
@@ -32,6 +34,7 @@ class BlueCurrentClient:
         self.logger = getLogger("BlueCurrentClient")
         self.httpx_client: AsyncClient | None = None
         self.queue = MultisubscriberQueue()
+        self.locks: defaultdict[str, Lock] = defaultdict(Lock)
         self.socket: ClientConnection | None = None
         self.token: str | None = None
 
@@ -74,8 +77,7 @@ class BlueCurrentClient:
                 "hubspot_user_identity": "a_very_long_string"
             }
         """
-        await self._send(dict(command="GET_ACCOUNT"), token=True)
-        result = await self._receive("ACCOUNT")
+        result = await self._request(dict(command="GET_ACCOUNT"), "ACCOUNT")
         del result["object"]
         return parse_datetime_keys(result, formats={"first_login_app": (("%d-%b-%y", "%Y-%m-%dT%H:%M:%S"), False)})
 
@@ -128,8 +130,7 @@ class BlueCurrentClient:
                 "date_became_invalid": None
             }
         """
-        await self._send(dict(command="GET_CHARGE_CARDS"), token=True)
-        result = (await self._receive("CHARGE_CARDS"))["cards"]
+        result = (await self._request(dict(command="GET_CHARGE_CARDS"), "CHARGE_CARDS"))["cards"]
         return parse_list_datetime_keys(
             result,
             formats={
@@ -172,8 +173,7 @@ class BlueCurrentClient:
                 "delayed_charging": {"value": False, "permission": "none"}
             }
         """
-        await self._send(dict(command="GET_CHARGE_POINTS"), token=True)
-        return (await self._receive("CHARGE_POINTS"))["data"]
+        return (await self._request(dict(command="GET_CHARGE_POINTS"), "CHARGE_POINTS"))["data"]
 
     async def get_charge_point_settings(self, evse_id: str) -> dict[str, bool | dict[str, Any] | str]:
         """
@@ -206,8 +206,7 @@ class BlueCurrentClient:
                 "led_interaction": {"value": False, "permission": "none"}
             }
         """
-        await self._send(dict(command="GET_CH_SETTINGS", evse_id=evse_id), token=True)
-        return (await self._receive("CH_SETTINGS"))["data"]
+        return (await self._request(dict(command="GET_CH_SETTINGS", evse_id=evse_id), "CH_SETTINGS"))["data"]
 
     async def get_grid_status(self, evse_id: str) -> dict[str, int | str]:
         """
@@ -227,13 +226,11 @@ class BlueCurrentClient:
                 "grid_max_reserved": 25
             }
         """
-        await self._send(dict(command="GET_GRID_STATUS", evse_id=evse_id), token=True)
-        return (await self._receive("GRID_STATUS"))["data"]
+        return (await self._request(dict(command="GET_GRID_STATUS", evse_id=evse_id), "GRID_STATUS"))["data"]
 
     async def get_sessions(self, evse_id: str):
         """Does not work"""
-        await self._send(dict(command="GET_SESSIONS"), token=True)
-        return await self._receive("SESSIONS")
+        return await self._request(dict(command="GET_SESSIONS"), "SESSIONS")
 
     async def get_sustainability_status(self) -> dict[str, float | int]:
         """
@@ -243,8 +240,7 @@ class BlueCurrentClient:
             A dictionary with two keys:
             {"trees": 1, "co2": 12.345}
         """
-        await self._send(dict(command="GET_SUSTAINABILITY_STATUS"), token=True)
-        result = await self._receive("SUSTAINABILITY_STATUS")
+        result = await self._request(dict(command="GET_SUSTAINABILITY_STATUS"), "SUSTAINABILITY_STATUS")
         result.pop("object")
         return result
 
@@ -262,11 +258,10 @@ class BlueCurrentClient:
                 as setting it to None.
         """
         token_uid = "BCU-APP" if uid is None or uid == "BCU_HOME_USE" else uid
-        await self._send(
+        result = await self._request(
             dict(command="SET_PLUG_AND_CHARGE_CHARGE_CARD", evse_id=evse_id, token_uid=token_uid),
-            token=True,
+            "STATUS_SET_PLUG_AND_CHARGE_CHARGE_CARD",
         )
-        result = await self._receive("STATUS_SET_PLUG_AND_CHARGE_CHARGE_CARD")
         if not result.get("success"):
             raise BlueCurrentException(result)
 
@@ -278,32 +273,26 @@ class BlueCurrentClient:
             evse_id: The ID of the charge point.
             enabled: Boolean that indicates the desired status.
         """
-        if enabled:
-            await self._send(dict(command="SET_OPERATIVE", evse_id=evse_id, flow_id=str(uuid4())), token=True)
-            await self._receive("RECEIVED_SET_OPERATIVE")
-            await self._receive("STATUS_SET_OPERATIVE", timeout=30)
-        else:
-            await self._send(dict(command="SET_INOPERATIVE", evse_id=evse_id, flow_id=str(uuid4())), token=True)
-            await self._receive("RECEIVED_SET_INOPERATIVE")
-            await self._receive("STATUS_SET_INOPERATIVE", timeout=30)
+        command = "SET_OPERATIVE" if enabled else "SET_INOPERATIVE"
+        flow_id = str(uuid4())
+        async with self._command(command):
+            await self._send(dict(command=command, evse_id=evse_id, flow_id=flow_id), token=True)
+            await self._receive(f"RECEIVED_{command}", flow_id=flow_id)
+            await self._receive(f"STATUS_{command}", timeout=30, flow_id=flow_id)
 
     async def unlock_connector(self, evse_id: str):
-        # TODO: test
-        await self._send(
-            dict(
-                command="UNLOCK_CONNECTOR",
-                evse_id=evse_id,
-            ),
-            token=True,
-        )
-        await self._receive("RECEIVED_UNLOCK_CONNECTOR")
-        return await self._receive("STATUS_UNLOCK_CONNECTOR", timeout=30)
+        flow_id = str(uuid4())
+        async with self._command("UNLOCK_CONNECTOR"):
+            await self._send(dict(command="UNLOCK_CONNECTOR", evse_id=evse_id, flow_id=flow_id), token=True)
+            await self._receive("RECEIVED_UNLOCK_CONNECTOR", flow_id=flow_id)
+            return await self._receive("STATUS_UNLOCK_CONNECTOR", timeout=30, flow_id=flow_id)
 
     async def soft_reset(self, evse_id: str):
-        # TODO: verify flow id
-        await self._send(dict(command="SOFT_RESET", evse_id=evse_id, flow_id=str(uuid4())), token=True)
-        await self._receive("RECEIVED_SOFT_RESET")
-        return await self._receive("STATUS_SOFT_RESET", timeout=30)
+        flow_id = str(uuid4())
+        async with self._command("SOFT_RESET"):
+            await self._send(dict(command="SOFT_RESET", evse_id=evse_id, flow_id=flow_id), token=True)
+            await self._receive("RECEIVED_SOFT_RESET", flow_id=flow_id)
+            return await self._receive("STATUS_SOFT_RESET", timeout=30, flow_id=flow_id)
 
     async def get_charge_point_status(self, evse_id: str) -> dict[str, datetime | float | int | str | None]:
         """
@@ -543,7 +532,7 @@ class BlueCurrentClient:
     def _user_agent(self) -> str:
         return f"pybluecurrent {__version__.split('+')[0]}"
 
-    async def _receive(self, obj: str, timeout: int = 10) -> dict[str, Any]:
+    async def _receive(self, obj: str, timeout: int = 10, flow_id: str | None = None) -> dict[str, Any]:
         with self.queue.queue() as q:
             while True:
                 try:
@@ -553,7 +542,14 @@ class BlueCurrentClient:
                     # builtin TimeoutError; normalise so callers can catch the builtin.
                     raise TimeoutError from exc
                 if message.get("object") == "ERROR":
-                    raise BlueCurrentException(message)
+                    # Attribute errors by flow_id when the backend echoes one, so a correlated
+                    # error doesn't poison other concurrent calls. Not every error carries a
+                    # flow_id (e.g. "forbidden" has none), so an uncorrelated error still raises
+                    # for whoever is waiting — falling back to the old broadcast behaviour.
+                    error_flow_id = message.get("flow_id")
+                    if error_flow_id in (flow_id, None):
+                        raise BlueCurrentException(message)
+                    continue
                 if message.get("object") == obj:
                     return message
 
@@ -563,3 +559,16 @@ class BlueCurrentClient:
         if self.socket is None:
             raise RuntimeError(f"{self.__class__.__name__} is not connected.")
         await self.socket.send(dumps(data, ensure_ascii=False))
+
+    @asynccontextmanager
+    async def _command(self, key: str) -> AsyncIterator[None]:
+        # Serialise calls that await the same response object so concurrent same-type calls
+        # can't consume each other's replies. Different keys keep running concurrently, so a
+        # slow command (e.g. soft_reset) doesn't block a quick read.
+        async with self.locks[key]:
+            yield
+
+    async def _request(self, data: dict[str, Any], response_object: str, timeout: int = 10) -> dict[str, Any]:
+        async with self._command(response_object):
+            await self._send(data, token=True)
+            return await self._receive(response_object, timeout=timeout)
