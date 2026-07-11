@@ -1,4 +1,5 @@
 from asyncio import Task, create_task, wait_for
+from asyncio import TimeoutError as AsyncTimeoutError
 from datetime import date, datetime
 from json import dumps, loads
 from logging import getLogger
@@ -545,7 +546,12 @@ class BlueCurrentClient:
     async def _receive(self, obj: str, timeout: int = 10) -> dict[str, Any]:
         with self.queue.queue() as q:
             while True:
-                message = await wait_for(q.get(), timeout=timeout)
+                try:
+                    message = await wait_for(q.get(), timeout=timeout)
+                except AsyncTimeoutError as exc:
+                    # On Python 3.10 asyncio.TimeoutError is a distinct class from the
+                    # builtin TimeoutError; normalise so callers can catch the builtin.
+                    raise TimeoutError from exc
                 if message.get("object") == "ERROR":
                     raise BlueCurrentException(message)
                 if message.get("object") == obj:
