@@ -15,6 +15,8 @@ This project is pre-1.0: breaking changes may land in minor releases.
 ### Changed
 
 - REST calls now use `api.bluecurrent.nl` instead of the legacy `bo.bluecurrent.nl` backoffice host (same `bc_api` v2.0 API and response shapes).
+- REST requests now use a 30-second timeout instead of httpx's 5-second default, so occasional slow backend responses no longer raise `httpx.ReadTimeout`; override with the `http_timeout` attribute.
+- Internal: added an offline websocket test harness (fake socket + recorded fixtures) so the auth/`_send`/`_receive`/`_handler` logic runs in CI without live credentials.
 
 ## [0.1.1] - 2026-07-04
 

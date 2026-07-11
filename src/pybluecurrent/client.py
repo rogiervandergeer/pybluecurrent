@@ -1,4 +1,5 @@
 from asyncio import Task, create_task, wait_for
+from asyncio import TimeoutError as AsyncTimeoutError
 from datetime import date, datetime
 from json import dumps, loads
 from logging import getLogger
@@ -19,6 +20,7 @@ class BlueCurrentClient:
     api_url: str = "https://api.bluecurrent.nl/app/bc_api/api/v2.0"
     psk: str = "d9ab2352a935be4ade182ce4921044f8"
     socket_url: str = "wss://motown.bluecurrent.nl/appserver/2.0"
+    http_timeout: float = 30.0
 
     def __init__(self, username: str | None = None, password: str | None = None, api_token: str | None = None):
         if api_token is None and (username is None or password is None):
@@ -38,7 +40,7 @@ class BlueCurrentClient:
         self.connection = connect(self.socket_url, user_agent_header=self._user_agent)
         self.socket = await self.connection.__aenter__()
         self.consumer = create_task(self._handler())
-        self.httpx_client = AsyncClient()
+        self.httpx_client = AsyncClient(timeout=self.http_timeout)
         await self.httpx_client.__aenter__()
         if self.token is None:
             await self._login()
@@ -118,7 +120,7 @@ class BlueCurrentClient:
             {
                 "uid": "A1B2C3D4E5F6",
                 "id": "NL-ABC-123456-0",
-                "name": "My Charge Cards",
+                "name": "My Charge Card",
                 "customer_name": "Your Name",
                 "valid": 1,
                 "date_created": date(2023, 6, 27),
@@ -544,7 +546,12 @@ class BlueCurrentClient:
     async def _receive(self, obj: str, timeout: int = 10) -> dict[str, Any]:
         with self.queue.queue() as q:
             while True:
-                message = await wait_for(q.get(), timeout=timeout)
+                try:
+                    message = await wait_for(q.get(), timeout=timeout)
+                except AsyncTimeoutError as exc:
+                    # On Python 3.10 asyncio.TimeoutError is a distinct class from the
+                    # builtin TimeoutError; normalise so callers can catch the builtin.
+                    raise TimeoutError from exc
                 if message.get("object") == "ERROR":
                     raise BlueCurrentException(message)
                 if message.get("object") == obj:
