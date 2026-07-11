@@ -18,6 +18,10 @@ This project is pre-1.0: breaking changes may land in minor releases.
 - REST requests now use a 30-second timeout instead of httpx's 5-second default, so occasional slow backend responses no longer raise `httpx.ReadTimeout`; override with the `http_timeout` attribute.
 - Internal: added an offline websocket test harness (fake socket + recorded fixtures) so the auth/`_send`/`_receive`/`_handler` logic runs in CI without live credentials.
 
+### Fixed
+
+- Concurrent websocket calls are now safe: calls awaiting the same response type are serialized so overlapping same-type calls can no longer receive each other's replies (different-type calls still run concurrently). Errors the backend tags with a request id are routed to the originating call rather than failing every in-flight call.
+
 ## [0.1.1] - 2026-07-04
 
 ### Fixed
