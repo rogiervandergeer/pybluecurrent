@@ -1,9 +1,9 @@
-from datetime import date
+from datetime import date, time
 from os import environ
 
 from pytest import mark, raises, skip
 
-from pybluecurrent import BlueCurrentClient
+from pybluecurrent import BlueCurrentClient, Weekday
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
 
 
@@ -131,6 +131,62 @@ class TestSocketApi:
     async def test_error(self, connected_client: BlueCurrentClient):
         with raises(BlueCurrentException) as e:
             await connected_client.set_status("BCU123456", False)
+        assert e.value.args[0]["message"] == "forbidden"
+
+
+class TestDelayedCharging:
+    async def test_status_reports_boosting(self, connected_client: BlueCurrentClient, evse_id: str):
+        # The read-back for boost(); assert it is there, so we notice if the backend drops it.
+        status = await connected_client.get_charge_point_status(evse_id)
+        assert isinstance(status["boosting"], bool)
+
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
+    async def test_set_delayed_charging_schedule(self, connected_client: BlueCurrentClient, evse_id: str):
+        async def _get_delayed_charging() -> dict:
+            settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+            return settings["delayed_charging"]  # type: ignore
+
+        before = await _get_delayed_charging()
+        if before["permission"] != "write":
+            skip(reason="No permission to change the delayed charging schedule.")
+
+        await connected_client.set_delayed_charging_schedule(
+            evse_id=evse_id, start_time=time(1, 23), end_time=time(4, 56), days=[Weekday.TUESDAY, "sa"]
+        )
+        after = await _get_delayed_charging()
+        assert after["start_time"] == "01:23"
+        assert after["end_time"] == "04:56"
+        assert after["selected_days"] == [2, 6]
+
+        await connected_client.set_delayed_charging_schedule(
+            evse_id=evse_id,
+            start_time=before["start_time"],
+            end_time=before["end_time"],
+            days=before["selected_days"],
+        )
+        assert await _get_delayed_charging() == before
+
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
+    async def test_set_delayed_charging(self, connected_client: BlueCurrentClient, evse_id: str):
+        settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+        delayed_charging: dict = settings["delayed_charging"]  # type: ignore
+        if delayed_charging["permission"] != "write" or delayed_charging["value"]:
+            skip(reason="Only perform this test if delayed charging is enabled-able and currently off.")
+        status = await connected_client.get_charge_point_status(evse_id=evse_id)
+        if status["activity"] == "charging":
+            # Enabling delayed charging outside of the configured window would stop a running session.
+            skip(reason="Do not interrupt an ongoing charging session.")
+
+        await connected_client.set_delayed_charging(evse_id=evse_id, enabled=True)
+        settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+        assert settings["delayed_charging"]["value"] is True  # type: ignore
+        await connected_client.set_delayed_charging(evse_id=evse_id, enabled=False)
+        settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+        assert settings["delayed_charging"]["value"] is False  # type: ignore
+
+    async def test_set_delayed_charging_of_other_charge_point(self, connected_client: BlueCurrentClient):
+        with raises(BlueCurrentException) as e:
+            await connected_client.set_delayed_charging("BCU123456", enabled=True)
         assert e.value.args[0]["message"] == "forbidden"
 
 

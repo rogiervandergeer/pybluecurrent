@@ -7,6 +7,11 @@ This project is pre-1.0: breaking changes may land in minor releases.
 
 ## [Unreleased]
 
+### Added
+
+- Delayed (time-window) smart charging: `set_delayed_charging()` to switch the profile on or off, `set_delayed_charging_schedule()` to set the window and the days it applies to, and `boost()` to charge now regardless of the window.
+- `Weekday`, an `IntEnum` numbered like `date.isoweekday()`. Days can also be given as plain numbers or as names (`"monday"`, `"mo"`), so importing it is optional.
+
 ## [0.2.0] - 2026-07-11
 
 ### Added
