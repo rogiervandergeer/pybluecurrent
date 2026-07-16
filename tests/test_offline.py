@@ -270,7 +270,17 @@ class TestOfflineDelayedCharging:
         # Nothing is sent when a day cannot be resolved.
         assert fake_rest.requests == []
 
-    async def test_boost(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+    async def test_boost_overrides_delayed_charging(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        # boost() reads the settings to see which profile is active, then overrides that one.
+        fake_socket.on(
+            "GET_CH_SETTINGS",
+            {
+                "object": "CH_SETTINGS",
+                "data": {"delayed_charging": {"value": True}, "price_based_charging": {"value": False}},
+            },
+        )
         await offline_client.boost("BCU123456")
         assert fake_rest.last_path == "overridedelayedchargingtimeout"
         assert fake_rest.last_body == {"evse_id": "BCU123456"}
@@ -288,3 +298,60 @@ class TestOfflineDelayedCharging:
         with raises(BlueCurrentException) as exc:
             await offline_client.set_delayed_charging_schedule("BCU123456", time(23, 0), time(7, 0), days=[1])
         assert exc.value.args[0]["error"] == "invalid schedule"
+
+
+class TestOfflinePriceBasedCharging:
+    """Price-based charging, which is sent over REST rather than over the websocket."""
+
+    async def test_set_price_based_charging(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        await offline_client.set_price_based_charging("BCU123456", enabled=True)
+        assert fake_rest.last_path == "setpricebasedcharging"
+        assert fake_rest.last_body == {"evse_id": "BCU123456", "value": True}
+
+    async def test_set_price_based_charging_settings(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        # The departure time may be a time or a "HH:MM" string; the kWh values may be fractional.
+        await offline_client.set_price_based_charging_settings(
+            "BCU123456", expected_departure_time=time(7, 0), expected_kwh=25.1, minimum_kwh=10
+        )
+        assert fake_rest.last_path == "setpricebasedsettings"
+        assert fake_rest.last_body == {
+            "evse_id": "BCU123456",
+            "expected_departure_time": "07:00",
+            "expected_kwh": 25.1,
+            "minimum_kwh": 10,
+        }
+
+    async def test_boost_overrides_price_based_charging(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_socket.on(
+            "GET_CH_SETTINGS",
+            {
+                "object": "CH_SETTINGS",
+                "data": {"delayed_charging": {"value": False}, "price_based_charging": {"value": True}},
+            },
+        )
+        await offline_client.boost("BCU123456")
+        assert fake_rest.last_path == "overridechargingprofiles"
+        assert fake_rest.last_body == {"boost": True, "evse_id": "BCU123456"}
+
+    async def test_boost_without_active_profile(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_socket.on(
+            "GET_CH_SETTINGS",
+            {
+                "object": "CH_SETTINGS",
+                "data": {"delayed_charging": {"value": False}, "price_based_charging": {"value": False}},
+            },
+        )
+        with raises(ValueError):
+            await offline_client.boost("BCU123456")
+        # Nothing is overridden when no profile is active.
+        assert fake_rest.requests == []
+
+    async def test_failure_is_raised(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("setpricebasedsettings", {"success": False, "error": "invalid settings"})
+        with raises(BlueCurrentException) as exc:
+            await offline_client.set_price_based_charging_settings("BCU123456", time(7, 0), 25, 10)
+        assert exc.value.args[0]["error"] == "invalid settings"

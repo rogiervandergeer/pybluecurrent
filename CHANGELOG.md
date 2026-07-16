@@ -9,7 +9,9 @@ This project is pre-1.0: breaking changes may land in minor releases.
 
 ### Added
 
-- Delayed (time-window) smart charging: `set_delayed_charging()` to switch the profile on or off, `set_delayed_charging_schedule()` to set the window and the days it applies to, and `boost()` to charge now regardless of the window.
+- Delayed (time-window) smart charging: `set_delayed_charging()` to switch the profile on or off, and `set_delayed_charging_schedule()` to set the window and the days it applies to.
+- Price-based (dynamic-tariff) smart charging: `set_price_based_charging()` to switch the profile on or off, and `set_price_based_charging_settings()` to set the expected departure time and energy.
+- `boost()` to charge now, overriding whichever smart charging profile (delayed or price-based) is currently active.
 - `Weekday`, an `IntEnum` numbered like `date.isoweekday()`. Days can also be given as plain numbers or as names (`"monday"`, `"mo"`), so importing it is optional.
 
 ## [0.2.0] - 2026-07-11

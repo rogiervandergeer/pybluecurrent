@@ -172,7 +172,8 @@ class BlueCurrentClient:
                 "location": {"x_coord": 50.1234, "y_coord": 5.01234, "street": "Europalaan", "housenumber": "100",
                              "zipcode": "3526KS", "city": "Utrecht", "country": "NL"},
                 "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00",
-                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5]}
+                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5]},
+                "price_based_charging": {"value": False, "permission": "write"}
             }
         """
         return (await self._request(dict(command="GET_CHARGE_POINTS"), "CHARGE_POINTS"))["data"]
@@ -207,7 +208,9 @@ class BlueCurrentClient:
                 "led_intensity": {"value": 0, "permission": "none"},
                 "led_interaction": {"value": False, "permission": "none"},
                 "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00",
-                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5]}
+                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5]},
+                "price_based_charging": {"value": True, "permission": "write", "expected_leave_time": "07:00",
+                                         "expected_kwh": 25, "minimum_kwh": 10}
             }
         """
         return (await self._request(dict(command="GET_CH_SETTINGS", evse_id=evse_id), "CH_SETTINGS"))["data"]
@@ -392,17 +395,75 @@ class BlueCurrentClient:
             ),
         )
 
-    async def boost(self, evse_id: str) -> None:
+    async def set_price_based_charging(self, evse_id: str, enabled: bool) -> None:
         """
-        Charge now, overriding the delayed charging window of a charge point.
+        Enable or disable price-based charging for a charge point.
 
-        The override applies to the ongoing session only, and cannot be undone. While it is
-        active, get_charge_point_status reports "boosting": True.
+        While enabled, the charge point charges during the cheapest hours before the expected
+        departure time, as configured with set_price_based_charging_settings. Enabling price-based
+        charging disables any other smart charging profile, as a charge point has at most one
+        profile active.
 
         Args:
             evse_id: A charge point ID.
+            enabled: Boolean that indicates whether price-based charging should be enabled.
         """
-        await self._post("overridedelayedchargingtimeout", dict(evse_id=evse_id))
+        await self._post("setpricebasedcharging", dict(evse_id=evse_id, value=enabled))
+
+    async def set_price_based_charging_settings(
+        self,
+        evse_id: str,
+        expected_departure_time: time | str,
+        expected_kwh: float,
+        minimum_kwh: float,
+    ) -> None:
+        """
+        Set the settings of the price-based charging profile of a charge point.
+
+        These settings are only applied while price-based charging is enabled with
+        set_price_based_charging.
+
+        Args:
+            evse_id: A charge point ID.
+            expected_departure_time: The time the vehicle is expected to leave, as a time or a
+                "HH:MM" string. Note that this is read back as "expected_leave_time" from the
+                price_based_charging settings.
+            expected_kwh: The amount of energy, in kWh, expected to be charged before departure.
+            minimum_kwh: The amount of energy, in kWh, to charge immediately regardless of price.
+        """
+        await self._post(
+            "setpricebasedsettings",
+            dict(
+                evse_id=evse_id,
+                expected_departure_time=format_time(expected_departure_time),
+                expected_kwh=expected_kwh,
+                minimum_kwh=minimum_kwh,
+            ),
+        )
+
+    async def boost(self, evse_id: str) -> None:
+        """
+        Charge now, overriding the active smart charging profile of a charge point.
+
+        Overrides whichever profile is currently delaying charging: delayed charging or
+        price-based charging. The override applies to the ongoing session only, and cannot be
+        undone. While it is active, get_charge_point_status reports "boosting": True.
+
+        Args:
+            evse_id: A charge point ID.
+
+        Raises:
+            ValueError: If no smart charging profile is active, so there is nothing to override.
+        """
+        settings = await self.get_charge_point_settings(evse_id)
+        price_based: Any = settings["price_based_charging"]
+        delayed: Any = settings["delayed_charging"]
+        if price_based["value"]:
+            await self._post("overridechargingprofiles", dict(boost=True, evse_id=evse_id))
+        elif delayed["value"]:
+            await self._post("overridedelayedchargingtimeout", dict(evse_id=evse_id))
+        else:
+            raise ValueError(f"No active smart charging profile to boost for {evse_id}.")
 
     async def get_contracts(self) -> list[dict[str, str]]:
         """
