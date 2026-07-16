@@ -172,8 +172,7 @@ class BlueCurrentClient:
                 "location": {"x_coord": 50.1234, "y_coord": 5.01234, "street": "Europalaan", "housenumber": "100",
                              "zipcode": "3526KS", "city": "Utrecht", "country": "NL"},
                 "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00",
-                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5],
-                                     "smart_current_heartbeat_timeout": 0}
+                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5]}
             }
         """
         return (await self._request(dict(command="GET_CHARGE_POINTS"), "CHARGE_POINTS"))["data"]
@@ -208,8 +207,7 @@ class BlueCurrentClient:
                 "led_intensity": {"value": 0, "permission": "none"},
                 "led_interaction": {"value": False, "permission": "none"},
                 "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00",
-                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5],
-                                     "smart_current_heartbeat_timeout": 0}
+                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5]}
             }
         """
         return (await self._request(dict(command="GET_CH_SETTINGS", evse_id=evse_id), "CH_SETTINGS"))["data"]
@@ -654,7 +652,7 @@ class BlueCurrentClient:
         response = await self.httpx_client.post(
             f"{self.api_url}/{path}",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
-            json=body,  # Unlike the other POSTs, these endpoints are sent an "application/json" content type.
+            json=body,  # Send the body as JSON (sets the Content-Type: application/json header), like the web app.
         )
         if not response.is_success:
             if response.headers.get("content-type", "").startswith("application/json"):

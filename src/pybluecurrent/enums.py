@@ -13,6 +13,11 @@ class Weekday(IntEnum):
     SATURDAY = 6
     SUNDAY = 7
 
+    def __str__(self) -> str:
+        # IntEnum's own __str__ differs across Python versions ("Weekday.MONDAY" on 3.10, "1" on 3.11+);
+        # pin it to a stable, human-readable day name.
+        return self.name.capitalize()
+
     @classmethod
     def _missing_(cls, value: Any) -> "Weekday | None":
         """Resolve a weekday from its name, or from any unambiguous abbreviation of it."""

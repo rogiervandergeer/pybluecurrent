@@ -160,7 +160,7 @@ A list of dictionaries, each representing a charge card:
     "location": {"x_coord": 50.1234, "y_coord": 5.01234, "street": "Europalaan", "housenumber": "100",
                  "zipcode": "3526KS", "city": "Utrecht", "country": "NL"},
     "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00", "end_time": "07:00",
-                         "selected_days": [1, 2, 3, 4, 5], "smart_current_heartbeat_timeout": 0}
+                         "selected_days": [1, 2, 3, 4, 5]}
 }
 ```
 
@@ -198,7 +198,7 @@ A dictionary describing the settings:
     "led_intensity": {"value": 0, "permission": "none"},
     "led_interaction": {"value": False, "permission": "none"},
     "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00", "end_time": "07:00",
-                         "selected_days": [1, 2, 3, 4, 5], "smart_current_heartbeat_timeout": 0}
+                         "selected_days": [1, 2, 3, 4, 5]}
 }
 ```
 
@@ -329,8 +329,8 @@ await client.set_delayed_charging_schedule(
 - `evse_id`: The ID of the charge point.
 - `start_time`: The time at which charging may start, as a `time` or a `"HH:MM"` string.
 - `end_time`: The time at which charging must stop, as a `time` or a `"HH:MM"` string.
-- `days`: The days on which the schedule applies. Each day may be a `Weekday`, an isoweekday number (1 for Monday
-  through 7 for Sunday), or a weekday name such as `"monday"` or `"mo"`.
+- `days`: The days on which the schedule applies. Each day may be a `pybluecurrent.Weekday`, an isoweekday number
+  (1 for Monday through 7 for Sunday), or a weekday name such as `"monday"` or `"mo"`.
 
 The schedule is read back from the `delayed_charging` key of
 [`get_charge_point_settings`](#getchargepointsettings---get-the-settings-of-a-charge-point).

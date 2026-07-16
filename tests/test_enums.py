@@ -22,3 +22,11 @@ class TestWeekday:
     def test_invalid(self, value: str | int):
         with raises(ValueError):
             Weekday(value)
+
+    def test_int_cast(self):
+        assert int(Weekday.MONDAY) == 1
+
+    def test_str_is_stable_day_name(self):
+        # Not IntEnum's version-dependent default ("Weekday.MONDAY" on 3.10, "1" on 3.11+).
+        assert str(Weekday.MONDAY) == "Monday"
+        assert str(Weekday.SUNDAY) == "Sunday"

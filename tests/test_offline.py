@@ -260,6 +260,16 @@ class TestOfflineDelayedCharging:
         with raises(ValueError):
             await offline_client.set_delayed_charging_schedule("BCU123456", time(23, 0), time(7, 0), days=[])
 
+    async def test_set_delayed_charging_schedule_with_invalid_day(
+        self, offline_client: BlueCurrentClient, fake_rest: FakeRest
+    ):
+        with raises(ValueError):
+            await offline_client.set_delayed_charging_schedule(
+                "BCU123456", time(23, 0), time(7, 0), days=[1, 2, "invalid"]
+            )
+        # Nothing is sent when a day cannot be resolved.
+        assert fake_rest.requests == []
+
     async def test_boost(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
         await offline_client.boost("BCU123456")
         assert fake_rest.last_path == "overridedelayedchargingtimeout"
