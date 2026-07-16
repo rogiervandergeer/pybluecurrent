@@ -2,10 +2,10 @@ from asyncio import Lock, Task, create_task, wait_for
 from asyncio import TimeoutError as AsyncTimeoutError
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, time
 from json import dumps, loads
 from logging import getLogger
-from typing import Any, AsyncIterable, AsyncIterator
+from typing import Any, AsyncIterable, AsyncIterator, Iterable
 from uuid import uuid4
 
 from asyncio_multisubscriber_queue import MultisubscriberQueue
@@ -14,8 +14,9 @@ from sjcl import SJCL
 from websockets.asyncio.client import ClientConnection, connect
 
 from pybluecurrent._version import __version__
+from pybluecurrent.enums import Weekday
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
-from pybluecurrent.utilities import parse_datetime_keys, parse_list_datetime_keys
+from pybluecurrent.utilities import format_time, parse_datetime_keys, parse_list_datetime_keys
 
 
 class BlueCurrentClient:
@@ -170,7 +171,9 @@ class BlueCurrentClient:
                 "activity": "available",
                 "location": {"x_coord": 50.1234, "y_coord": 5.01234, "street": "Europalaan", "housenumber": "100",
                              "zipcode": "3526KS", "city": "Utrecht", "country": "NL"},
-                "delayed_charging": {"value": False, "permission": "none"}
+                "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00",
+                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5]},
+                "price_based_charging": {"value": False, "permission": "write"}
             }
         """
         return (await self._request(dict(command="GET_CHARGE_POINTS"), "CHARGE_POINTS"))["data"]
@@ -203,7 +206,11 @@ class BlueCurrentClient:
                 "chargepoint_type": "HIDDEN",
                 "plug_and_charge_notification": False,
                 "led_intensity": {"value": 0, "permission": "none"},
-                "led_interaction": {"value": False, "permission": "none"}
+                "led_interaction": {"value": False, "permission": "none"},
+                "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00",
+                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5]},
+                "price_based_charging": {"value": True, "permission": "write", "expected_leave_time": "07:00",
+                                         "expected_kwh": 25, "minimum_kwh": 10}
             }
         """
         return (await self._request(dict(command="GET_CH_SETTINGS", evse_id=evse_id), "CH_SETTINGS"))["data"]
@@ -309,6 +316,7 @@ class BlueCurrentClient:
                 "actual_v2": 0,
                 "actual_v3": 0,
                 "actual_kwh": 0,
+                "boosting": False,
                 "max_usage": 20,
                 "smartcharging_max_usage": 6,
                 "max_offline": 10,
@@ -335,6 +343,127 @@ class BlueCurrentClient:
                 "stop_datetime": ("%Y%m%d %H:%M:%S", False),
             },
         )
+
+    async def set_delayed_charging(self, evse_id: str, enabled: bool) -> None:
+        """
+        Enable or disable delayed charging for a charge point.
+
+        While enabled, the charge point only charges within the window configured with
+        set_delayed_charging_schedule. Enabling delayed charging disables any other smart
+        charging profile, as a charge point has at most one profile active.
+
+        Args:
+            evse_id: A charge point ID.
+            enabled: Boolean that indicates whether delayed charging should be enabled.
+        """
+        await self._post("setdelayedcharging", dict(evse_id=evse_id, value=enabled))
+
+    async def set_delayed_charging_schedule(
+        self,
+        evse_id: str,
+        start_time: time | str,
+        end_time: time | str,
+        days: Iterable[Weekday | int | str],
+    ) -> None:
+        """
+        Set the schedule of the delayed charging profile of a charge point.
+
+        The charge point charges between start_time and end_time on the selected days, and
+        delays charging outside of that window. A window may span midnight. The schedule is
+        only applied while delayed charging is enabled with set_delayed_charging.
+
+        Args:
+            evse_id: A charge point ID.
+            start_time: The time at which charging may start, as a time or a "HH:MM" string.
+            end_time: The time at which charging must stop, as a time or a "HH:MM" string.
+            days: The days on which the schedule applies. Each day may be a Weekday, an
+                isoweekday number (1 for Monday through 7 for Sunday), or a weekday name
+                such as "monday" or "mo".
+        """
+        selected_days = sorted({int(Weekday(day)) for day in days})
+        if not selected_days:
+            raise ValueError("Select at least one day.")
+        await self._post(
+            "savescheduledelayedcharging",
+            dict(
+                evse_id=evse_id,
+                start_time=format_time(start_time),
+                end_time=format_time(end_time),
+                # The backend rejects the schedule unless the days are formatted exactly as the web
+                # app's JSON.stringify() emits them: a JSON string without whitespace.
+                days=dumps(selected_days, separators=(",", ":")),
+            ),
+        )
+
+    async def set_price_based_charging(self, evse_id: str, enabled: bool) -> None:
+        """
+        Enable or disable price-based charging for a charge point.
+
+        While enabled, the charge point charges during the cheapest hours before the expected
+        departure time, as configured with set_price_based_charging_settings. Enabling price-based
+        charging disables any other smart charging profile, as a charge point has at most one
+        profile active.
+
+        Args:
+            evse_id: A charge point ID.
+            enabled: Boolean that indicates whether price-based charging should be enabled.
+        """
+        await self._post("setpricebasedcharging", dict(evse_id=evse_id, value=enabled))
+
+    async def set_price_based_charging_settings(
+        self,
+        evse_id: str,
+        expected_departure_time: time | str,
+        expected_kwh: float,
+        minimum_kwh: float,
+    ) -> None:
+        """
+        Set the settings of the price-based charging profile of a charge point.
+
+        These settings are only applied while price-based charging is enabled with
+        set_price_based_charging.
+
+        Args:
+            evse_id: A charge point ID.
+            expected_departure_time: The time the vehicle is expected to leave, as a time or a
+                "HH:MM" string. Note that this is read back as "expected_leave_time" from the
+                price_based_charging settings.
+            expected_kwh: The amount of energy, in kWh, expected to be charged before departure.
+            minimum_kwh: The amount of energy, in kWh, to charge immediately regardless of price.
+        """
+        await self._post(
+            "setpricebasedsettings",
+            dict(
+                evse_id=evse_id,
+                expected_departure_time=format_time(expected_departure_time),
+                expected_kwh=expected_kwh,
+                minimum_kwh=minimum_kwh,
+            ),
+        )
+
+    async def boost(self, evse_id: str) -> None:
+        """
+        Charge now, overriding the active smart charging profile of a charge point.
+
+        Overrides whichever profile is currently delaying charging: delayed charging or
+        price-based charging. The override applies to the ongoing session only, and cannot be
+        undone. While it is active, get_charge_point_status reports "boosting": True.
+
+        Args:
+            evse_id: A charge point ID.
+
+        Raises:
+            ValueError: If no smart charging profile is active, so there is nothing to override.
+        """
+        settings = await self.get_charge_point_settings(evse_id)
+        price_based: Any = settings["price_based_charging"]
+        delayed: Any = settings["delayed_charging"]
+        if price_based["value"]:
+            await self._post("overridechargingprofiles", dict(boost=True, evse_id=evse_id))
+        elif delayed["value"]:
+            await self._post("overridedelayedchargingtimeout", dict(evse_id=evse_id))
+        else:
+            raise ValueError(f"No active smart charging profile to boost for {evse_id}.")
 
     async def get_contracts(self) -> list[dict[str, str]]:
         """
@@ -572,3 +701,25 @@ class BlueCurrentClient:
         async with self._command(response_object):
             await self._send(data, token=True)
             return await self._receive(response_object, timeout=timeout)
+
+    async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Post a command to the REST API.
+
+        A rejected command comes back as an HTTP error carrying the same {"object": "ERROR", ...}
+        body that the websocket sends, so it is raised as a BlueCurrentException as well.
+        """
+        if self.httpx_client is None:
+            raise RuntimeError(f"{self.__class__.__name__} is not connected.")
+        response = await self.httpx_client.post(
+            f"{self.api_url}/{path}",
+            headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
+            json=body,  # Send the body as JSON (sets the Content-Type: application/json header), like the web app.
+        )
+        if not response.is_success:
+            if response.headers.get("content-type", "").startswith("application/json"):
+                raise BlueCurrentException(response.json())
+            response.raise_for_status()
+        result = response.json()
+        if result.get("success") is False:
+            raise BlueCurrentException(result)
+        return result

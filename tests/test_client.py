@@ -1,9 +1,9 @@
-from datetime import date
+from datetime import date, time
 from os import environ
 
 from pytest import mark, raises, skip
 
-from pybluecurrent import BlueCurrentClient
+from pybluecurrent import BlueCurrentClient, Weekday
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
 
 
@@ -131,6 +131,152 @@ class TestSocketApi:
     async def test_error(self, connected_client: BlueCurrentClient):
         with raises(BlueCurrentException) as e:
             await connected_client.set_status("BCU123456", False)
+        assert e.value.args[0]["message"] == "forbidden"
+
+
+async def _capture_active_profile(client: BlueCurrentClient, evse_id: str) -> dict[str, bool]:
+    """Which smart charging profile, if any, is currently enabled (at most one can be)."""
+    settings = await client.get_charge_point_settings(evse_id=evse_id)
+    return {
+        "delayed": bool(settings["delayed_charging"]["value"]),  # type: ignore
+        "price_based": bool(settings["price_based_charging"]["value"]),  # type: ignore
+    }
+
+
+async def _restore_active_profile(client: BlueCurrentClient, evse_id: str, active: dict[str, bool]) -> None:
+    """Put the charge point back in the profile state captured by _capture_active_profile."""
+    if active["delayed"]:
+        await client.set_delayed_charging(evse_id=evse_id, enabled=True)
+    elif active["price_based"]:
+        await client.set_price_based_charging(evse_id=evse_id, enabled=True)
+    else:
+        await client.set_price_based_charging(evse_id=evse_id, enabled=False)
+        await client.set_delayed_charging(evse_id=evse_id, enabled=False)
+
+
+class TestDelayedCharging:
+    async def test_status_reports_boosting(self, connected_client: BlueCurrentClient, evse_id: str):
+        # The read-back for boost(); assert it is there, so we notice if the backend drops it.
+        status = await connected_client.get_charge_point_status(evse_id)
+        assert isinstance(status["boosting"], bool)
+
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
+    async def test_set_delayed_charging_schedule(self, connected_client: BlueCurrentClient, evse_id: str):
+        async def _get_delayed_charging() -> dict:
+            settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+            return settings["delayed_charging"]  # type: ignore
+
+        before = await _get_delayed_charging()
+        if before["permission"] != "write":
+            skip(reason="No permission to change the delayed charging schedule.")
+
+        await connected_client.set_delayed_charging_schedule(
+            evse_id=evse_id, start_time=time(1, 23), end_time=time(4, 56), days=[Weekday.TUESDAY, "sa"]
+        )
+        after = await _get_delayed_charging()
+        assert after["start_time"] == "01:23"
+        assert after["end_time"] == "04:56"
+        assert after["selected_days"] == [2, 6]
+
+        await connected_client.set_delayed_charging_schedule(
+            evse_id=evse_id,
+            start_time=before["start_time"],
+            end_time=before["end_time"],
+            days=before["selected_days"],
+        )
+        assert await _get_delayed_charging() == before
+
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
+    async def test_set_delayed_charging(self, connected_client: BlueCurrentClient, evse_id: str):
+        settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+        if settings["delayed_charging"]["permission"] != "write":  # type: ignore
+            skip(reason="No permission to change delayed charging.")
+        status = await connected_client.get_charge_point_status(evse_id=evse_id)
+        if status["activity"] == "charging":
+            # Toggling a smart charging profile could interrupt a running session.
+            skip(reason="Do not interrupt an ongoing charging session.")
+
+        active_before = await _capture_active_profile(connected_client, evse_id)
+        try:
+            await connected_client.set_delayed_charging(evse_id=evse_id, enabled=True)
+            settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+            assert settings["delayed_charging"]["value"] is True  # type: ignore
+            await connected_client.set_delayed_charging(evse_id=evse_id, enabled=False)
+            settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+            assert settings["delayed_charging"]["value"] is False  # type: ignore
+        finally:
+            await _restore_active_profile(connected_client, evse_id, active_before)
+
+    async def test_set_delayed_charging_of_other_charge_point(self, connected_client: BlueCurrentClient):
+        with raises(BlueCurrentException) as e:
+            await connected_client.set_delayed_charging("BCU123456", enabled=True)
+        assert e.value.args[0]["message"] == "forbidden"
+
+
+class TestPriceBasedCharging:
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
+    async def test_set_price_based_charging_settings(self, connected_client: BlueCurrentClient, evse_id: str):
+        async def _get_price_based_charging() -> dict:
+            settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+            return settings["price_based_charging"]  # type: ignore
+
+        if (await _get_price_based_charging())["permission"] != "write":
+            skip(reason="No permission to change the price-based charging settings.")
+        status = await connected_client.get_charge_point_status(evse_id=evse_id)
+        if status["activity"] == "charging":
+            # Enabling price-based charging to read its settings back could interrupt a running session.
+            skip(reason="Do not interrupt an ongoing charging session.")
+
+        # Price-based settings are only surfaced in the read-back while the profile is enabled,
+        # so enable it for the round-trip and restore the original profile state afterwards.
+        active_before = await _capture_active_profile(connected_client, evse_id)
+        await connected_client.set_price_based_charging(evse_id=evse_id, enabled=True)
+        try:
+            before = await _get_price_based_charging()
+
+            # A fractional expected_kwh confirms the endpoint accepts and round-trips non-integer kWh.
+            await connected_client.set_price_based_charging_settings(
+                evse_id=evse_id, expected_departure_time=time(6, 30), expected_kwh=25.1, minimum_kwh=10
+            )
+            after = await _get_price_based_charging()
+            assert after["expected_leave_time"] == "06:30"
+            assert after["expected_kwh"] == 25.1
+            assert after["minimum_kwh"] == 10
+
+            if before.get("expected_leave_time"):
+                await connected_client.set_price_based_charging_settings(
+                    evse_id=evse_id,
+                    expected_departure_time=before["expected_leave_time"],
+                    expected_kwh=before["expected_kwh"],
+                    minimum_kwh=before["minimum_kwh"],
+                )
+        finally:
+            await _restore_active_profile(connected_client, evse_id, active_before)
+
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
+    async def test_set_price_based_charging(self, connected_client: BlueCurrentClient, evse_id: str):
+        settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+        if settings["price_based_charging"]["permission"] != "write":  # type: ignore
+            skip(reason="No permission to change price-based charging.")
+        status = await connected_client.get_charge_point_status(evse_id=evse_id)
+        if status["activity"] == "charging":
+            # Toggling a smart charging profile could interrupt a running session.
+            skip(reason="Do not interrupt an ongoing charging session.")
+
+        active_before = await _capture_active_profile(connected_client, evse_id)
+        try:
+            await connected_client.set_price_based_charging(evse_id=evse_id, enabled=True)
+            settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+            assert settings["price_based_charging"]["value"] is True  # type: ignore
+            await connected_client.set_price_based_charging(evse_id=evse_id, enabled=False)
+            settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+            assert settings["price_based_charging"]["value"] is False  # type: ignore
+        finally:
+            await _restore_active_profile(connected_client, evse_id, active_before)
+
+    async def test_set_price_based_charging_of_other_charge_point(self, connected_client: BlueCurrentClient):
+        with raises(BlueCurrentException) as e:
+            await connected_client.set_price_based_charging("BCU123456", enabled=True)
         assert e.value.args[0]["message"] == "forbidden"
 
 

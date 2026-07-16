@@ -36,6 +36,11 @@ The `BlueCurrentClient` exposes the following methods:
 - [`set_status`](#setstatus---enable-or-disable-a-charge-point)
 - [`login`](#login---log-in)
 - [`get_charge_point_status`](#getchargepointstatus---get-the-status-of-a-charge-point)
+- [`set_delayed_charging`](#setdelayedcharging---enable-or-disable-delayed-charging)
+- [`set_delayed_charging_schedule`](#setdelayedchargingschedule---set-the-delayed-charging-schedule)
+- [`set_price_based_charging`](#setpricebasedcharging---enable-or-disable-price-based-charging)
+- [`set_price_based_charging_settings`](#setpricebasedchargingsettings---set-the-price-based-charging-settings)
+- [`boost`](#boost---charge-now-overriding-the-active-smart-charging-profile)
 - [`get_contracts`](#getcontracts---get-your-contracts)
 - [`get_grids`](#getgrids---get-your-grid-connections)
 - [`get_transactions`](#gettransactions---get-a-list-of-transactions)
@@ -156,7 +161,9 @@ A list of dictionaries, each representing a charge card:
     "activity": "available",
     "location": {"x_coord": 50.1234, "y_coord": 5.01234, "street": "Europalaan", "housenumber": "100",
                  "zipcode": "3526KS", "city": "Utrecht", "country": "NL"},
-    "delayed_charging": {"value": False, "permission": "none"}
+    "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00", "end_time": "07:00",
+                         "selected_days": [1, 2, 3, 4, 5]},
+    "price_based_charging": {"value": False, "permission": "write"}
 }
 ```
 
@@ -192,7 +199,11 @@ A dictionary describing the settings:
     "chargepoint_type": "HIDDEN",
     "plug_and_charge_notification": False,
     "led_intensity": {"value": 0, "permission": "none"},
-    "led_interaction": {"value": False, "permission": "none"}
+    "led_interaction": {"value": False, "permission": "none"},
+    "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00", "end_time": "07:00",
+                         "selected_days": [1, 2, 3, 4, 5]},
+    "price_based_charging": {"value": True, "permission": "write", "expected_leave_time": "07:00",
+                             "expected_kwh": 25, "minimum_kwh": 10}
 }
 ```
 
@@ -266,6 +277,7 @@ A dictionary with the chargepoint status:
     "actual_v2": 0,
     "actual_v3": 0,
     "actual_kwh": 0,
+    "boosting": False,
     "max_usage": 20,
     "smartcharging_max_usage": 6,
     "max_offline": 10,
@@ -277,6 +289,110 @@ A dictionary with the chargepoint status:
     "evse_id": "BCU123456",
 }
 ```
+
+#### `set_delayed_charging` - Enable or disable delayed charging.
+
+```python
+async def set_delayed_charging(self, evse_id: str, enabled: bool) -> None
+```
+
+While delayed charging is enabled, the charge point only charges within the window configured with
+[`set_delayed_charging_schedule`](#setdelayedchargingschedule---set-the-delayed-charging-schedule), and delays charging
+outside of it. A charge point has at most one smart charging profile active, so enabling delayed charging disables any
+other profile.
+
+##### Arguments
+- `evse_id`: The ID of the charge point.
+- `enabled`: Boolean that indicates whether delayed charging should be enabled.
+
+#### `set_delayed_charging_schedule` - Set the delayed charging schedule.
+
+```python
+async def set_delayed_charging_schedule(
+    self,
+    evse_id: str,
+    start_time: time | str,
+    end_time: time | str,
+    days: Iterable[Weekday | int | str],
+) -> None
+```
+
+Sets the window in which the charge point may charge on the selected days. The window may span midnight. It is only
+applied while delayed charging is enabled with
+[`set_delayed_charging`](#setdelayedcharging---enable-or-disable-delayed-charging).
+
+```python
+from datetime import time
+from pybluecurrent import Weekday
+
+await client.set_delayed_charging_schedule(
+    "BCU123456", start_time=time(23, 0), end_time=time(7, 0), days=[Weekday.MONDAY, "tu", 3]
+)
+```
+
+##### Arguments
+- `evse_id`: The ID of the charge point.
+- `start_time`: The time at which charging may start, as a `time` or a `"HH:MM"` string.
+- `end_time`: The time at which charging must stop, as a `time` or a `"HH:MM"` string.
+- `days`: The days on which the schedule applies. Each day may be a `pybluecurrent.Weekday`, an isoweekday number
+  (1 for Monday through 7 for Sunday), or a weekday name such as `"monday"` or `"mo"`.
+
+The schedule is read back from the `delayed_charging` key of
+[`get_charge_point_settings`](#getchargepointsettings---get-the-settings-of-a-charge-point).
+
+#### `set_price_based_charging` - Enable or disable price-based charging.
+
+```python
+async def set_price_based_charging(self, evse_id: str, enabled: bool) -> None
+```
+
+While price-based charging is enabled, the charge point charges during the cheapest hours before the expected departure
+time, as configured with
+[`set_price_based_charging_settings`](#setpricebasedchargingsettings---set-the-price-based-charging-settings). A charge
+point has at most one smart charging profile active, so enabling price-based charging disables any other profile.
+
+##### Arguments
+- `evse_id`: The ID of the charge point.
+- `enabled`: Boolean that indicates whether price-based charging should be enabled.
+
+#### `set_price_based_charging_settings` - Set the price-based charging settings.
+
+```python
+async def set_price_based_charging_settings(
+    self,
+    evse_id: str,
+    expected_departure_time: time | str,
+    expected_kwh: float,
+    minimum_kwh: float,
+) -> None
+```
+
+Configures how much energy to charge before departure. Only applied while price-based charging is enabled with
+[`set_price_based_charging`](#setpricebasedcharging---enable-or-disable-price-based-charging).
+
+##### Arguments
+- `evse_id`: The ID of the charge point.
+- `expected_departure_time`: The time the vehicle is expected to leave, as a `time` or a `"HH:MM"` string. Note this is
+  read back as `expected_leave_time` from the `price_based_charging` settings.
+- `expected_kwh`: The amount of energy, in kWh, expected to be charged before departure.
+- `minimum_kwh`: The amount of energy, in kWh, to charge immediately regardless of price.
+
+The settings are read back from the `price_based_charging` key of
+[`get_charge_point_settings`](#getchargepointsettings---get-the-settings-of-a-charge-point).
+
+#### `boost` - Charge now, overriding the active smart charging profile.
+
+```python
+async def boost(self, evse_id: str) -> None
+```
+
+Starts charging immediately, overriding whichever smart charging profile is currently delaying charging — delayed
+charging or price-based charging — for the ongoing session. The override cannot be undone. While it is active,
+[`get_charge_point_status`](#getchargepointstatus---get-the-status-of-a-charge-point) reports `"boosting": True`.
+Raises `ValueError` if no smart charging profile is active.
+
+##### Arguments
+- `evse_id`: The ID of the charge point.
 
 #### `get_contracts` - Get your contracts.
 

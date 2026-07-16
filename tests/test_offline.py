@@ -1,12 +1,13 @@
 from asyncio import CancelledError, create_task, gather, sleep
 from contextlib import suppress
-from datetime import date, datetime
+from datetime import date, datetime, time
 from json import JSONDecodeError
 
+from fake_rest import FakeRest
 from fake_socket import FAKE_CUSTOMER_ID, FAKE_TOKEN, FakeSocket, load_fixture, make_fake_connect
 from pytest import MonkeyPatch, raises
 
-from pybluecurrent import BlueCurrentClient
+from pybluecurrent import BlueCurrentClient, Weekday
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
 
 
@@ -223,3 +224,134 @@ class TestOfflineConcurrency:
         reset.cancel()
         with suppress(CancelledError):
             await reset
+
+
+class TestOfflineDelayedCharging:
+    """Delayed charging, which is sent over REST rather than over the websocket."""
+
+    async def test_set_delayed_charging(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        await offline_client.set_delayed_charging("BCU123456", enabled=True)
+        assert fake_rest.last_path == "setdelayedcharging"
+        assert fake_rest.last_body == {"evse_id": "BCU123456", "value": True}
+
+    async def test_set_delayed_charging_schedule(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        # Days may be a Weekday, an isoweekday number or a weekday name, and end up sorted and
+        # deduplicated in a JSON-encoded string — which is how the backend wants them.
+        await offline_client.set_delayed_charging_schedule(
+            "BCU123456", start_time=time(23, 0), end_time=time(7, 0), days=[Weekday.WEDNESDAY, 2, "mo", "MONDAY"]
+        )
+        assert fake_rest.last_path == "savescheduledelayedcharging"
+        assert fake_rest.last_body == {
+            "evse_id": "BCU123456",
+            "start_time": "23:00",
+            "end_time": "07:00",
+            "days": "[1,2,3]",
+        }
+
+    async def test_set_delayed_charging_schedule_with_string_times(
+        self, offline_client: BlueCurrentClient, fake_rest: FakeRest
+    ):
+        await offline_client.set_delayed_charging_schedule("BCU123456", "9:30", "17:00", days=[7])
+        assert fake_rest.last_body["start_time"] == "09:30"
+        assert fake_rest.last_body["end_time"] == "17:00"
+        assert fake_rest.last_body["days"] == "[7]"
+
+    async def test_set_delayed_charging_schedule_without_days(self, offline_client: BlueCurrentClient):
+        with raises(ValueError):
+            await offline_client.set_delayed_charging_schedule("BCU123456", time(23, 0), time(7, 0), days=[])
+
+    async def test_set_delayed_charging_schedule_with_invalid_day(
+        self, offline_client: BlueCurrentClient, fake_rest: FakeRest
+    ):
+        with raises(ValueError):
+            await offline_client.set_delayed_charging_schedule(
+                "BCU123456", time(23, 0), time(7, 0), days=[1, 2, "invalid"]
+            )
+        # Nothing is sent when a day cannot be resolved.
+        assert fake_rest.requests == []
+
+    async def test_boost_overrides_delayed_charging(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        # boost() reads the settings to see which profile is active, then overrides that one.
+        fake_socket.on(
+            "GET_CH_SETTINGS",
+            {
+                "object": "CH_SETTINGS",
+                "data": {"delayed_charging": {"value": True}, "price_based_charging": {"value": False}},
+            },
+        )
+        await offline_client.boost("BCU123456")
+        assert fake_rest.last_path == "overridedelayedchargingtimeout"
+        assert fake_rest.last_body == {"evse_id": "BCU123456"}
+
+    async def test_rejection_is_raised(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        # A rejected command answers with an HTTP error carrying the same body the websocket
+        # sends for a rejection, so it surfaces as the same exception.
+        fake_rest.on("setdelayedcharging", {"object": "ERROR", "error": 2, "message": "forbidden"}, status_code=401)
+        with raises(BlueCurrentException) as exc:
+            await offline_client.set_delayed_charging("BCU123456", enabled=True)
+        assert exc.value.args[0]["message"] == "forbidden"
+
+    async def test_failure_is_raised(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("savescheduledelayedcharging", {"success": False, "error": "invalid schedule"})
+        with raises(BlueCurrentException) as exc:
+            await offline_client.set_delayed_charging_schedule("BCU123456", time(23, 0), time(7, 0), days=[1])
+        assert exc.value.args[0]["error"] == "invalid schedule"
+
+
+class TestOfflinePriceBasedCharging:
+    """Price-based charging, which is sent over REST rather than over the websocket."""
+
+    async def test_set_price_based_charging(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        await offline_client.set_price_based_charging("BCU123456", enabled=True)
+        assert fake_rest.last_path == "setpricebasedcharging"
+        assert fake_rest.last_body == {"evse_id": "BCU123456", "value": True}
+
+    async def test_set_price_based_charging_settings(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        # The departure time may be a time or a "HH:MM" string; the kWh values may be fractional.
+        await offline_client.set_price_based_charging_settings(
+            "BCU123456", expected_departure_time=time(7, 0), expected_kwh=25.1, minimum_kwh=10
+        )
+        assert fake_rest.last_path == "setpricebasedsettings"
+        assert fake_rest.last_body == {
+            "evse_id": "BCU123456",
+            "expected_departure_time": "07:00",
+            "expected_kwh": 25.1,
+            "minimum_kwh": 10,
+        }
+
+    async def test_boost_overrides_price_based_charging(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_socket.on(
+            "GET_CH_SETTINGS",
+            {
+                "object": "CH_SETTINGS",
+                "data": {"delayed_charging": {"value": False}, "price_based_charging": {"value": True}},
+            },
+        )
+        await offline_client.boost("BCU123456")
+        assert fake_rest.last_path == "overridechargingprofiles"
+        assert fake_rest.last_body == {"boost": True, "evse_id": "BCU123456"}
+
+    async def test_boost_without_active_profile(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_socket.on(
+            "GET_CH_SETTINGS",
+            {
+                "object": "CH_SETTINGS",
+                "data": {"delayed_charging": {"value": False}, "price_based_charging": {"value": False}},
+            },
+        )
+        with raises(ValueError):
+            await offline_client.boost("BCU123456")
+        # Nothing is overridden when no profile is active.
+        assert fake_rest.requests == []
+
+    async def test_failure_is_raised(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("setpricebasedsettings", {"success": False, "error": "invalid settings"})
+        with raises(BlueCurrentException) as exc:
+            await offline_client.set_price_based_charging_settings("BCU123456", time(7, 0), 25, 10)
+        assert exc.value.args[0]["error"] == "invalid settings"

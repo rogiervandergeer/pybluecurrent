@@ -1,5 +1,10 @@
-from datetime import datetime
+from datetime import datetime, time
 from typing import Any
+
+
+def format_time(value: time | str) -> str:
+    """Format a time of day as "HH:MM". Strings are parsed first, so that "9:30" becomes "09:30"."""
+    return (datetime.strptime(value, "%H:%M").time() if isinstance(value, str) else value).strftime("%H:%M")
 
 
 def parse_datetime_keys(

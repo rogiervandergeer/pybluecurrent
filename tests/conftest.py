@@ -1,6 +1,7 @@
 from os import environ
 from typing import AsyncGenerator
 
+from fake_rest import FakeRest, make_fake_async_client
 from fake_socket import FakeSocket, make_fake_connect
 from pytest import MonkeyPatch, fixture, skip
 
@@ -19,9 +20,18 @@ def fake_socket() -> FakeSocket:
 
 
 @fixture(scope="function")
-async def offline_client(monkeypatch: MonkeyPatch, fake_socket: FakeSocket) -> AsyncGenerator[BlueCurrentClient, None]:
-    """A connected client backed by ``fake_socket`` — no credentials, no network."""
+def fake_rest() -> FakeRest:
+    """A fresh offline REST API, answering every request with success."""
+    return FakeRest()
+
+
+@fixture(scope="function")
+async def offline_client(
+    monkeypatch: MonkeyPatch, fake_socket: FakeSocket, fake_rest: FakeRest
+) -> AsyncGenerator[BlueCurrentClient, None]:
+    """A connected client backed by ``fake_socket`` and ``fake_rest`` — no credentials, no network."""
     monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
+    monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
     async with BlueCurrentClient("username", "password") as client:
         yield client
 
