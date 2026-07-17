@@ -1,9 +1,9 @@
-from asyncio import Lock, Task, create_task, wait_for
+from asyncio import CancelledError, Lock, Task, create_task, get_running_loop, wait_for
 from asyncio import TimeoutError as AsyncTimeoutError
 from collections import defaultdict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, time
-from json import dumps, loads
+from json import JSONDecodeError, dumps, loads
 from logging import getLogger
 from typing import Any, AsyncIterable, AsyncIterator, Iterable
 from uuid import uuid4
@@ -15,8 +15,12 @@ from websockets.asyncio.client import ClientConnection, connect
 
 from pybluecurrent._version import __version__
 from pybluecurrent.enums import Weekday
-from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
+from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException, ConnectionLost, RequestTimeout
 from pybluecurrent.utilities import format_time, parse_datetime_keys, parse_list_datetime_keys
+
+# Identity sentinel broadcast on the queue when the receive handler exits, so in-flight _receive
+# waiters wake immediately instead of blocking until their own deadline.
+_CONNECTION_CLOSED = object()
 
 
 class BlueCurrentClient:
@@ -28,6 +32,7 @@ class BlueCurrentClient:
     def __init__(self, username: str | None = None, password: str | None = None, api_token: str | None = None):
         if api_token is None and (username is None or password is None):
             raise ValueError("Provide either username and password, or api_token.")
+        self.connection = None
         self.consumer: Task | None = None
         self.credentials: tuple[str | None, str | None] = (username, password)
         self.api_token: str | None = api_token
@@ -38,27 +43,65 @@ class BlueCurrentClient:
         self.locks: defaultdict[str, Lock] = defaultdict(Lock)
         self.socket: ClientConnection | None = None
         self.token: str | None = None
+        # Set once the receive handler terminates; makes calls made after a drop fail fast.
+        self._closed: BlueCurrentException | None = None
 
     async def __aenter__(self) -> "BlueCurrentClient":
         self.logger.debug("Creating BlueCurrent websocket connection")
+        self._closed = None
         self.connection = connect(self.socket_url, user_agent_header=self._user_agent)
         self.socket = await self.connection.__aenter__()
-        self.consumer = create_task(self._handler())
-        self.httpx_client = AsyncClient(timeout=self.http_timeout)
-        await self.httpx_client.__aenter__()
-        if self.token is None:
-            await self._login()
-        await self._hello()
+        try:
+            self.consumer = create_task(self._handler())
+            self.consumer.add_done_callback(self._on_handler_done)
+            self.httpx_client = AsyncClient(timeout=self.http_timeout)
+            await self.httpx_client.__aenter__()
+            if self.token is None:
+                await self._login()
+            await self._hello()
+        except BaseException:
+            # A failure here (auth rejected, hello timed out, a mid-handshake drop, cancellation)
+            # would otherwise leak the socket, the handler task, and the httpx client, since
+            # __aexit__ never runs when __aenter__ raises.
+            await self._teardown()
+            raise
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self.logger.debug("Closing BlueCurrent connection")
+        await self._teardown(exc_type, exc_val, exc_tb)
+
+    async def _teardown(self, exc_type=None, exc_val=None, exc_tb=None) -> None:
+        """Release the transport, tolerating partial construction and errors in any single step.
+
+        Reused by both __aexit__ and the __aenter__ failure path, so it must be safe to call with
+        any subset of the socket/handler/httpx client set up (or already torn down).
+        """
         if self.consumer is not None:
+            # Stop the handler before closing the socket it iterates, and actually await the
+            # cancellation so its exception is retrieved rather than left dangling.
             self.consumer.cancel()
-        await self.connection.__aexit__(exc_type, exc_val, exc_tb)
+            with suppress(CancelledError):
+                await self.consumer
+        if self.connection is not None:
+            try:
+                await self.connection.__aexit__(exc_type, exc_val, exc_tb)
+            except Exception:
+                self.logger.debug("Error closing websocket connection", exc_info=True)
         if self.httpx_client is not None:
-            await self.httpx_client.__aexit__(exc_type, exc_val, exc_tb)
-        self.consumer, self.socket, self.httpx_client = None, None, None
+            try:
+                await self.httpx_client.__aexit__(exc_type, exc_val, exc_tb)
+            except Exception:
+                self.logger.debug("Error closing httpx client", exc_info=True)
+        self.consumer = self.socket = self.httpx_client = self.connection = None
+
+    def _on_handler_done(self, task: Task) -> None:
+        """Log an unexpected exit of the handler."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self.logger.error("Websocket receive handler exited", exc_info=exc)
 
     async def get_account(self) -> dict[str, bool | datetime | str]:
         """
@@ -653,23 +696,59 @@ class BlueCurrentClient:
     async def _handler(self) -> None:
         if self.socket is None:
             raise RuntimeError(f"{self.__class__.__name__} is not connected.")
-        async for message in self.socket:
-            self.logger.debug(f"Received message: {message}")
-            await self.queue.put(loads(message))
+        terminal: BlueCurrentException = ConnectionLost("The websocket connection was closed.")
+        try:
+            async for message in self.socket:
+                self.logger.debug(f"Received message: {message}")
+                try:
+                    decoded = loads(message)
+                except JSONDecodeError:
+                    # A single malformed frame is a transient wire artifact, not a reason to tear
+                    # down a working connection; log it and keep the handler alive.
+                    self.logger.warning("Discarding malformed (non-JSON) frame: %r", message)
+                    continue
+                await self.queue.put(decoded)
+        except Exception as exc:
+            terminal = ConnectionLost("The websocket connection failed.")
+            terminal.__cause__ = exc
+            raise
+        finally:
+            # Record why the handler stopped and wake every in-flight waiter. The assignment is
+            # synchronous, so _closed is set even if the queue.put below is cut short by cancellation.
+            self._closed = terminal
+            await self.queue.put(_CONNECTION_CLOSED)
 
     @property
     def _user_agent(self) -> str:
         return f"pybluecurrent {__version__.split('+')[0]}"
 
     async def _receive(self, obj: str, timeout: int = 10, flow_id: str | None = None) -> dict[str, Any]:
+        if self._closed is not None:
+            # The handler already died; don't subscribe and block for a reply that can't arrive.
+            raise self._closed
+        loop = get_running_loop()
+        deadline = loop.time() + timeout
         with self.queue.queue() as q:
             while True:
+                # A single deadline for the whole call: a stream of non-matching frames can no
+                # longer re-arm a per-message timeout and postpone it forever.
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise RequestTimeout(f"No {obj} received within {timeout}s.")
                 try:
-                    message = await wait_for(q.get(), timeout=timeout)
+                    message = await wait_for(q.get(), timeout=remaining)
                 except AsyncTimeoutError as exc:
-                    # On Python 3.10 asyncio.TimeoutError is a distinct class from the
-                    # builtin TimeoutError; normalise so callers can catch the builtin.
-                    raise TimeoutError from exc
+                    # RequestTimeout subclasses the builtin TimeoutError, so existing
+                    # ``except TimeoutError`` callers keep working (also fixes py3.10, where
+                    # asyncio.TimeoutError is a distinct class from the builtin).
+                    raise RequestTimeout(f"No {obj} received within {timeout}s.") from exc
+                if message is _CONNECTION_CLOSED:
+                    # Identity check before .get(): the sentinel is not a dict.
+                    raise (
+                        self._closed
+                        if self._closed is not None
+                        else ConnectionLost("The websocket connection was closed.")
+                    )
                 if message.get("object") == "ERROR":
                     # Attribute errors by flow_id when the backend echoes one, so a correlated
                     # error doesn't poison other concurrent calls. Not every error carries a
@@ -683,6 +762,8 @@ class BlueCurrentClient:
                     return message
 
     async def _send(self, data: dict[str, Any], token: bool = False):
+        if self._closed is not None:
+            raise self._closed
         if token:
             data.update(dict(Authorization=f"Token {self.token}"))
         if self.socket is None:

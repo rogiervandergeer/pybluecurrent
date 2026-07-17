@@ -1,32 +1,37 @@
 from asyncio import CancelledError, create_task, gather, sleep
 from contextlib import suppress
 from datetime import date, datetime, time
-from json import JSONDecodeError
 
 from fake_rest import FakeRest
 from fake_socket import FAKE_CUSTOMER_ID, FAKE_TOKEN, FakeSocket, load_fixture, make_fake_connect
 from pytest import MonkeyPatch, raises
 
 from pybluecurrent import BlueCurrentClient, Weekday
-from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
+from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException, ConnectionLost, RequestTimeout
+
+
+async def _drain(client: BlueCurrentClient) -> None:
+    """Yield control until the handler has finished shutting down (``_closed`` is set)."""
+    for _ in range(10):
+        await sleep(0)
+        if client._closed is not None:
+            break
 
 
 async def _expect_auth_failure(monkeypatch: MonkeyPatch, socket: FakeSocket, **client_kwargs) -> None:
     """Connect a client backed by ``socket`` and assert ``__aenter__`` fails authentication.
 
-    Cleans up the leaked handler task / httpx client itself, since ``__aexit__`` never runs when
-    ``__aenter__`` raises (a lifecycle gap tracked separately in #9).
+    Also asserts the failed connect leaks nothing: ``__aenter__`` tears down the socket, the
+    handler task and the httpx client itself when it raises.
     """
     monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(socket))
     client = BlueCurrentClient(**client_kwargs)
-    try:
-        with raises(AuthenticationFailed):
-            await client.__aenter__()
-    finally:
-        if client.consumer is not None:
-            client.consumer.cancel()
-        if client.httpx_client is not None:
-            await client.httpx_client.__aexit__(None, None, None)
+    with raises(AuthenticationFailed):
+        await client.__aenter__()
+    assert client.consumer is None
+    assert client.socket is None
+    assert client.httpx_client is None
+    assert client.connection is None
 
 
 class TestOfflineAuth:
@@ -85,11 +90,14 @@ class TestOfflineTransport:
         assert exc.value.args[0]["message"] == "forbidden"
 
     async def test_receive_timeout(self, offline_client: BlueCurrentClient):
+        # RequestTimeout subclasses the builtin TimeoutError, so both catch sites keep working.
         with raises(TimeoutError):
+            await offline_client._receive("NEVER_ARRIVES", timeout=0)
+        with raises(RequestTimeout):
             await offline_client._receive("NEVER_ARRIVES", timeout=0)
 
     async def test_handler_fans_out_to_all_waiters(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
-        # A single frame reaches every concurrent waiter — the broadcast behaviour that #8 hardens.
+        # A single frame reaches every concurrent waiter.
         first = create_task(offline_client._receive("PING"))
         second = create_task(offline_client._receive("PING"))
         await sleep(0)
@@ -97,17 +105,16 @@ class TestOfflineTransport:
         assert (await first)["value"] == 1
         assert (await second)["value"] == 1
 
-    async def test_non_json_frame_kills_consumer(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
-        # Documents current behaviour: a malformed frame kills the handler task (a seam #9 will address).
+    async def test_non_json_frame_is_skipped(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        # A malformed frame is logged and skipped; the handler survives and still delivers later frames.
         consumer = offline_client.consumer
         assert consumer is not None
+        task = create_task(offline_client._receive("PONG"))
+        await sleep(0)
         fake_socket.feed("this is not json")
-        for _ in range(5):
-            await sleep(0)
-            if consumer.done():
-                break
-        assert consumer.done()
-        assert isinstance(consumer.exception(), JSONDecodeError)
+        fake_socket.feed({"object": "PONG", "value": 1})
+        assert (await task)["value"] == 1
+        assert not consumer.done()
 
 
 class TestOfflineCommands:
@@ -355,3 +362,56 @@ class TestOfflinePriceBasedCharging:
         with raises(BlueCurrentException) as exc:
             await offline_client.set_price_based_charging_settings("BCU123456", time(7, 0), 25, 10)
         assert exc.value.args[0]["error"] == "invalid settings"
+
+
+class TestOfflineLifecycle:
+    """Connection-failure surfacing and teardown."""
+
+    async def test_inflight_receive_woken_by_drop(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        # A waiter blocked on a reply is woken by a mid-call drop, not left hanging until timeout.
+        task = create_task(offline_client._receive("NEVER", timeout=10))
+        await sleep(0)
+        fake_socket.close()
+        with raises(ConnectionLost):
+            await task
+
+    async def test_receive_after_death_fast_fails(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.close()
+        await _drain(offline_client)
+        with raises(ConnectionLost):
+            await offline_client._receive("X", timeout=10)
+
+    async def test_public_call_after_death_raises(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        # The guard reaches through _request / _send, so a normal read fails fast too.
+        fake_socket.close()
+        await _drain(offline_client)
+        with raises(ConnectionLost):
+            await offline_client.get_grid_status("A")
+
+    async def test_send_after_death_raises(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.close()
+        await _drain(offline_client)
+        with raises(ConnectionLost):
+            await offline_client._send({"command": "PING"})
+
+    async def test_aexit_awaits_and_is_idempotent(self, monkeypatch: MonkeyPatch, fake_socket: FakeSocket):
+        monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
+        async with BlueCurrentClient("username", "password") as client:
+            consumer = client.consumer
+        assert consumer is not None
+        assert consumer.done()  # the handler was awaited, not just cancelled fire-and-forget
+        assert client.consumer is None and client.socket is None and client.connection is None
+        await client.__aexit__(None, None, None)  # a second teardown must not raise
+
+    async def test_per_call_deadline_survives_noise(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        # A batch of non-matching frames must not swallow the deadline; the call still times out.
+        for _ in range(20):
+            fake_socket.feed({"object": "NOISE"})
+        with raises(RequestTimeout):
+            await offline_client._receive("WANTED", timeout=0.1)
+
+    async def test_new_exceptions_are_bluecurrent_exceptions(self):
+        assert issubclass(RequestTimeout, TimeoutError)
+        assert issubclass(RequestTimeout, BlueCurrentException)
+        assert issubclass(ConnectionLost, BlueCurrentException)
+        assert issubclass(AuthenticationFailed, (BlueCurrentException, ValueError))

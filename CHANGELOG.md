@@ -13,6 +13,16 @@ This project is pre-1.0: breaking changes may land in minor releases.
 - Price-based (dynamic-tariff) smart charging: `set_price_based_charging()` to switch the profile on or off, and `set_price_based_charging_settings()` to set the expected departure time and energy.
 - `boost()` to charge now, overriding whichever smart charging profile (delayed or price-based) is currently active.
 - `Weekday`, an `IntEnum` numbered like `date.isoweekday()`. Days can also be given as plain numbers or as names (`"monday"`, `"mo"`), so importing it is optional.
+- `ConnectionLost` and `RequestTimeout` exceptions. Both derive from `BlueCurrentException`; `RequestTimeout` also subclasses the builtin `TimeoutError` (so existing `except TimeoutError` keeps working), and `AuthenticationFailed` now derives from `BlueCurrentException` as well as `ValueError`.
+
+### Changed
+
+- Websocket connection failures are now surfaced instead of hanging. When the handler stops (the connection drops, or an unexpected error), pending and subsequent calls raise `ConnectionLost` immediately rather than blocking until they time out. A single malformed (non-JSON) frame is now logged and skipped instead of silently killing the connection.
+- `_receive` now enforces a single per-call deadline (a stream of unrelated frames can no longer postpone it indefinitely) and raises `RequestTimeout` rather than a bare `TimeoutError`.
+
+### Fixed
+
+- The client no longer leaks the websocket, handler task, or HTTP client when connecting fails partway (for example on a rejected login), and teardown now awaits the handler and closes the HTTP client even if closing the websocket errors.
 
 ## [0.2.0] - 2026-07-11
 
