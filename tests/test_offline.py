@@ -161,6 +161,71 @@ class TestOfflineCommands:
         assert exc.value.args[0]["message"] == "forbidden"
 
 
+class TestOfflineTwoPhaseCommands:
+    """The RECEIVED_ -> STATUS_ commands: a falsy STATUS_ ``success`` must raise, not pass silently.
+
+    The backend sends STATUS_ seconds after RECEIVED_, so these drive the two phases by hand: script
+    only the RECEIVED_ ack, let the command reach its STATUS_ wait, then feed the STATUS_ frame. (The
+    broadcast queue only reaches live subscribers, so feeding both at once would drop STATUS_.)
+    """
+
+    @staticmethod
+    async def _reach_status_wait() -> None:
+        """Yield enough for a two-phase command to consume RECEIVED_ and subscribe for STATUS_."""
+        for _ in range(10):
+            await sleep(0)
+
+    async def test_set_status_success(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.on("SET_INOPERATIVE", {"object": "RECEIVED_SET_INOPERATIVE"})
+        task = create_task(offline_client.set_status("BCU123456", enabled=False))
+        await self._reach_status_wait()
+        fake_socket.feed({"object": "STATUS_SET_INOPERATIVE", "success": True})
+        assert await task is None
+
+    async def test_set_status_failure_raises(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        # The backend reports the charger's non-response as a STATUS_ frame with success=False; the
+        # command did nothing, so surface it instead of returning cleanly.
+        fake_socket.on("SET_INOPERATIVE", {"object": "RECEIVED_SET_INOPERATIVE"})
+        task = create_task(offline_client.set_status("BCU123456", enabled=False))
+        await self._reach_status_wait()
+        fake_socket.feed({"object": "STATUS_SET_INOPERATIVE", "success": False, "error": "TIMEOUT"})
+        with raises(BlueCurrentException) as exc:
+            await task
+        assert exc.value.args[0]["error"] == "TIMEOUT"
+
+    async def test_unlock_connector_success_returns_status(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket
+    ):
+        fake_socket.on("UNLOCK_CONNECTOR", {"object": "RECEIVED_UNLOCK_CONNECTOR"})
+        task = create_task(offline_client.unlock_connector("BCU123456"))
+        await self._reach_status_wait()
+        fake_socket.feed({"object": "STATUS_UNLOCK_CONNECTOR", "success": True, "evse_id": "BCU123456"})
+        assert (await task)["success"] is True
+
+    async def test_unlock_connector_failure_raises(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.on("UNLOCK_CONNECTOR", {"object": "RECEIVED_UNLOCK_CONNECTOR"})
+        task = create_task(offline_client.unlock_connector("BCU123456"))
+        await self._reach_status_wait()
+        fake_socket.feed({"object": "STATUS_UNLOCK_CONNECTOR", "success": False, "error": "TIMEOUT"})
+        with raises(BlueCurrentException):
+            await task
+
+    async def test_soft_reset_success_returns_status(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.on("SOFT_RESET", {"object": "RECEIVED_SOFT_RESET"})
+        task = create_task(offline_client.soft_reset("BCU123456"))
+        await self._reach_status_wait()
+        fake_socket.feed({"object": "STATUS_SOFT_RESET", "success": True})
+        assert (await task)["success"] is True
+
+    async def test_soft_reset_failure_raises(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.on("SOFT_RESET", {"object": "RECEIVED_SOFT_RESET"})
+        task = create_task(offline_client.soft_reset("BCU123456"))
+        await self._reach_status_wait()
+        fake_socket.feed({"object": "STATUS_SOFT_RESET", "success": False, "error": "TIMEOUT"})
+        with raises(BlueCurrentException):
+            await task
+
+
 class TestOfflineConcurrency:
     """Concurrency safety: same-type serialization (C1) and error attribution (C2)."""
 

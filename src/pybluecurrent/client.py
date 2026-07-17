@@ -28,6 +28,9 @@ class BlueCurrentClient:
     psk: str = "d9ab2352a935be4ade182ce4921044f8"
     socket_url: str = "wss://motown.bluecurrent.nl/appserver/2.0"
     http_timeout: float = 30.0
+    # Two-phase commands (set_status, unlock_connector, soft_reset) await a STATUS_ verdict that the
+    # backend renders behind its own ~30s ceiling — the answer lands just after 30s, so wait longer.
+    command_timeout: int = 60
 
     def __init__(self, username: str | None = None, password: str | None = None, api_token: str | None = None):
         if api_token is None and (username is None or password is None):
@@ -328,21 +331,29 @@ class BlueCurrentClient:
         async with self._command(command):
             await self._send(dict(command=command, evse_id=evse_id, flow_id=flow_id), token=True)
             await self._receive(f"RECEIVED_{command}", flow_id=flow_id)
-            await self._receive(f"STATUS_{command}", timeout=30, flow_id=flow_id)
+            status = await self._receive(f"STATUS_{command}", timeout=self.command_timeout, flow_id=flow_id)
+            if not status.get("success"):
+                raise BlueCurrentException(status)
 
     async def unlock_connector(self, evse_id: str):
         flow_id = str(uuid4())
         async with self._command("UNLOCK_CONNECTOR"):
             await self._send(dict(command="UNLOCK_CONNECTOR", evse_id=evse_id, flow_id=flow_id), token=True)
             await self._receive("RECEIVED_UNLOCK_CONNECTOR", flow_id=flow_id)
-            return await self._receive("STATUS_UNLOCK_CONNECTOR", timeout=30, flow_id=flow_id)
+            status = await self._receive("STATUS_UNLOCK_CONNECTOR", timeout=self.command_timeout, flow_id=flow_id)
+            if not status.get("success"):
+                raise BlueCurrentException(status)
+            return status
 
     async def soft_reset(self, evse_id: str):
         flow_id = str(uuid4())
         async with self._command("SOFT_RESET"):
             await self._send(dict(command="SOFT_RESET", evse_id=evse_id, flow_id=flow_id), token=True)
             await self._receive("RECEIVED_SOFT_RESET", flow_id=flow_id)
-            return await self._receive("STATUS_SOFT_RESET", timeout=30, flow_id=flow_id)
+            status = await self._receive("STATUS_SOFT_RESET", timeout=self.command_timeout, flow_id=flow_id)
+            if not status.get("success"):
+                raise BlueCurrentException(status)
+            return status
 
     async def get_charge_point_status(self, evse_id: str) -> dict[str, datetime | float | int | str | None]:
         """
