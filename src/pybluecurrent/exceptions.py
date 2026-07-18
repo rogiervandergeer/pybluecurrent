@@ -15,3 +15,17 @@ class RequestTimeout(BlueCurrentException, TimeoutError):
 
     Also a builtin ``TimeoutError``, so ``except TimeoutError`` catches it.
     """
+
+
+class _GiveUp(Exception):
+    """Internal signal that the reconnect supervisor is abandoning the connection permanently.
+
+    Carries the terminal ``reason`` (an ``AuthenticationFailed`` for bad credentials, or a
+    ``ConnectionLost`` when it stops trying to reconnect) to latch onto ``_closed``. Deliberately
+    not a ``BlueCurrentException`` so it never leaks to callers or gets caught by the reconnect
+    loop's ``except BlueCurrentException``.
+    """
+
+    def __init__(self, reason: BlueCurrentException) -> None:
+        super().__init__(reason)
+        self.reason = reason

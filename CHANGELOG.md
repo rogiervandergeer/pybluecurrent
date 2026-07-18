@@ -9,6 +9,7 @@ This project is pre-1.0: breaking changes may land in minor releases.
 
 ### Added
 
+- Automatic reconnection. A long-lived client now keeps itself connected: when the websocket drops it reconnects in the background with exponential backoff, reusing the cached session token. Calls made while reconnecting block until the connection is restored (bounded by `reconnect_wait_timeout`) rather than failing; calls already in flight when the drop happens still raise `ConnectionLost`. Tunable via the `auto_reconnect` (default on) and `reconnect_*` class attributes. Reconnection gives up after too many attempts, or immediately on rejected credentials, rather than retrying forever.
 - Delayed (time-window) smart charging: `set_delayed_charging()` to switch the profile on or off, and `set_delayed_charging_schedule()` to set the window and the days it applies to.
 - Price-based (dynamic-tariff) smart charging: `set_price_based_charging()` to switch the profile on or off, and `set_price_based_charging_settings()` to set the expected departure time and energy.
 - `boost()` to charge now, overriding whichever smart charging profile (delayed or price-based) is currently active.
