@@ -510,6 +510,7 @@ class BlueCurrentClient:
                 raise BlueCurrentException(status)
 
     async def unlock_connector(self, evse_id: str):
+        """Unlock the connector of a charge point. Raises ``BlueCurrentException`` if it fails."""
         flow_id = str(uuid4())
         async with self._command("UNLOCK_CONNECTOR"):
             await self._await_connected()
@@ -521,6 +522,7 @@ class BlueCurrentClient:
             return status
 
     async def soft_reset(self, evse_id: str):
+        """Soft-reset a charge point. Raises ``BlueCurrentException`` if it fails."""
         flow_id = str(uuid4())
         async with self._command("SOFT_RESET"):
             await self._await_connected()
@@ -619,8 +621,7 @@ class BlueCurrentClient:
                 evse_id=evse_id,
                 start_time=format_time(start_time),
                 end_time=format_time(end_time),
-                # The backend rejects the schedule unless the days are formatted exactly as the web
-                # app's JSON.stringify() emits them: a JSON string without whitespace.
+                # Days must be a whitespace-free JSON string, exactly as the web app's JSON.stringify emits.
                 days=dumps(selected_days, separators=(",", ":")),
             ),
         )
@@ -889,8 +890,7 @@ class BlueCurrentClient:
                 try:
                     decoded = loads(message)
                 except JSONDecodeError:
-                    # A single malformed frame is a transient wire artifact, not a reason to tear
-                    # down a working connection; log it and keep the handler alive.
+                    # A single malformed frame is a transient wire artifact; log it and keep going.
                     logger.warning("Discarding malformed (non-JSON) frame: %r", message)
                     continue
                 logger.debug("Received message: %s", _redact(decoded))
@@ -900,8 +900,7 @@ class BlueCurrentClient:
             terminal.__cause__ = exc
             raise
         finally:
-            # Record why this connection dropped and wake in-flight waiters. Synchronous, so it's set
-            # even if the queue.put below is cut short by cancellation.
+            # Set the drop reason synchronously (survives cancellation of the queue.put) and wake waiters.
             self._drop_reason = terminal
             await self.queue.put(_CONNECTION_CLOSED)
 
@@ -917,26 +916,22 @@ class BlueCurrentClient:
         deadline = loop.time() + timeout
         with self.queue.queue() as q:
             while True:
-                # A single deadline for the whole call: a stream of non-matching frames can no
-                # longer re-arm a per-message timeout and postpone it forever.
+                # One deadline for the whole call, so a stream of non-matching frames can't re-arm it.
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise RequestTimeout(f"No {obj} received within {timeout}s.")
                 try:
                     message = await wait_for(q.get(), timeout=remaining)
                 except AsyncTimeoutError as exc:
-                    # RequestTimeout subclasses the builtin TimeoutError, so existing
-                    # ``except TimeoutError`` callers keep working (also fixes py3.10, where
-                    # asyncio.TimeoutError is a distinct class from the builtin).
+                    # RequestTimeout subclasses TimeoutError so ``except TimeoutError`` still works
+                    # (and normalises py3.10, where asyncio.TimeoutError is a distinct class).
                     raise RequestTimeout(f"No {obj} received within {timeout}s.") from exc
                 if message is _CONNECTION_CLOSED:
                     # Identity check before .get(): the sentinel is not a dict.
                     raise self._closed or self._drop_reason or ConnectionLost("The websocket connection was closed.")
                 if message.get("object") == "ERROR":
-                    # Attribute errors by flow_id when the backend echoes one, so a correlated
-                    # error doesn't poison other concurrent calls. Not every error carries a
-                    # flow_id (e.g. "forbidden" has none), so an uncorrelated error still raises
-                    # for whoever is waiting — falling back to the old broadcast behaviour.
+                    # Route errors by flow_id so a correlated one doesn't poison other calls; an
+                    # uncorrelated error (no flow_id, e.g. "forbidden") still raises for the waiter.
                     error_flow_id = message.get("flow_id")
                     if error_flow_id in (flow_id, None):
                         raise BlueCurrentException(message)
@@ -960,9 +955,8 @@ class BlueCurrentClient:
 
     @asynccontextmanager
     async def _command(self, key: str) -> AsyncIterator[None]:
-        # Serialise calls that await the same response object so concurrent same-type calls
-        # can't consume each other's replies. Different keys keep running concurrently, so a
-        # slow command (e.g. soft_reset) doesn't block a quick read.
+        # Serialise same-key calls so they can't consume each other's replies; different keys run
+        # concurrently, so a slow command (e.g. soft_reset) doesn't block a quick read.
         async with self.locks[key]:
             yield
 
@@ -983,7 +977,7 @@ class BlueCurrentClient:
         response = await self.httpx_client.post(
             f"{self.api_url}/{path}",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
-            json=body,  # Send the body as JSON (sets the Content-Type: application/json header), like the web app.
+            json=body,  # send as JSON (sets Content-Type), like the web app
         )
         if not response.is_success:
             if response.headers.get("content-type", "").startswith("application/json"):
