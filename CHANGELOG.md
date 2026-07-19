@@ -24,7 +24,12 @@ This project is pre-1.0: breaking changes may land in minor releases.
 
 ### Fixed
 
+- The session token is no longer written to debug logs. Received frames were logged verbatim at debug level, which included the token carried by the login-response frames; those fields are now masked.
 - The client no longer leaks the websocket, handler task, or HTTP client when connecting fails partway (for example on a rejected login), and teardown now awaits the handler and closes the HTTP client even if closing the websocket errors.
+
+### Changed
+
+- Logging now uses a module logger (`pybluecurrent.client`) instead of a fixed `BlueCurrentClient` name, and the reconnect failure paths (attempts, back-off, wait-timeouts, and permanent give-up) are logged.
 
 ## [0.2.0] - 2026-07-11
 
