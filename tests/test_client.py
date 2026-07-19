@@ -1,10 +1,23 @@
 from datetime import date, time
 from os import environ
 
+from models_check import assert_model
 from pytest import mark, raises, skip
 
 from pybluecurrent import BlueCurrentClient, Weekday
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException
+from pybluecurrent.models import (
+    Account,
+    ChargeCard,
+    ChargePoint,
+    ChargePointSettings,
+    ChargePointStatus,
+    Contract,
+    Grid,
+    GridStatus,
+    SustainabilityStatus,
+    TransactionsPage,
+)
 
 
 class TestHeaders:
@@ -32,6 +45,7 @@ class TestAuthentication:
 class TestSocketApi:
     async def test_get_account(self, connected_client: BlueCurrentClient):
         account = await connected_client.get_account()
+        assert_model(account, Account)
         assert "full_name" in account
         assert isinstance(account["first_login_app"], date)
 
@@ -39,6 +53,7 @@ class TestSocketApi:
         charge_cards = await connected_client.get_charge_cards()
         if len(charge_cards) == 0:
             skip(reason="No charge cards.")
+        assert_model(charge_cards, list[ChargeCard])
         assert all("uid" in charge_card for charge_card in charge_cards)
         assert all(
             obj is None or isinstance(obj, date)
@@ -54,17 +69,19 @@ class TestSocketApi:
         charge_points = await connected_client.get_charge_points()
         if len(charge_points) == 0:
             skip(reason="No charge cards.")
+        assert_model(charge_points, list[ChargePoint])
         for charge_point in charge_points:
             assert "evse_id" in charge_point
 
     async def test_get_grid_status(self, connected_client: BlueCurrentClient, evse_id: str):
         status = await connected_client.get_grid_status(evse_id=evse_id)
+        assert_model(status, GridStatus)
         assert "grid_actual_p1" in status
         assert "id" in status
 
     async def test_get_charge_point_settings(self, connected_client: BlueCurrentClient, evse_id: str):
         settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-        assert isinstance(settings, dict)
+        assert_model(settings, ChargePointSettings)
         assert settings["evse_id"] == evse_id
 
     @mark.skip("Does not work")
@@ -74,6 +91,7 @@ class TestSocketApi:
 
     async def test_get_sustainability_status(self, connected_client: BlueCurrentClient):
         sessions = await connected_client.get_sustainability_status()
+        assert_model(sessions, SustainabilityStatus)
         assert set(sessions.keys()) == {"trees", "co2"}
 
     @mark.skip("Does not work.")
@@ -146,8 +164,8 @@ async def _capture_active_profile(client: BlueCurrentClient, evse_id: str) -> di
     """Which smart charging profile, if any, is currently enabled (at most one can be)."""
     settings = await client.get_charge_point_settings(evse_id=evse_id)
     return {
-        "delayed": bool(settings["delayed_charging"]["value"]),  # type: ignore
-        "price_based": bool(settings["price_based_charging"]["value"]),  # type: ignore
+        "delayed": bool(settings["delayed_charging"]["value"]),
+        "price_based": bool(settings["price_based_charging"]["value"]),
     }
 
 
@@ -172,7 +190,7 @@ class TestDelayedCharging:
     async def test_set_delayed_charging_schedule(self, connected_client: BlueCurrentClient, evse_id: str):
         async def _get_delayed_charging() -> dict:
             settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-            return settings["delayed_charging"]  # type: ignore
+            return settings["delayed_charging"]
 
         before = await _get_delayed_charging()
         if before["permission"] != "write":
@@ -184,20 +202,20 @@ class TestDelayedCharging:
         after = await _get_delayed_charging()
         assert after["start_time"] == "01:23"
         assert after["end_time"] == "04:56"
-        assert after["selected_days"] == [2, 6]
+        assert after["days"] == [2, 6]
 
         await connected_client.set_delayed_charging_schedule(
             evse_id=evse_id,
             start_time=before["start_time"],
             end_time=before["end_time"],
-            days=before["selected_days"],
+            days=before["days"],
         )
         assert await _get_delayed_charging() == before
 
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
     async def test_set_delayed_charging(self, connected_client: BlueCurrentClient, evse_id: str):
         settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-        if settings["delayed_charging"]["permission"] != "write":  # type: ignore
+        if settings["delayed_charging"]["permission"] != "write":
             skip(reason="No permission to change delayed charging.")
         status = await connected_client.get_charge_point_status(evse_id=evse_id)
         if status["activity"] == "charging":
@@ -208,10 +226,10 @@ class TestDelayedCharging:
         try:
             await connected_client.set_delayed_charging(evse_id=evse_id, enabled=True)
             settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-            assert settings["delayed_charging"]["value"] is True  # type: ignore
+            assert settings["delayed_charging"]["value"] is True
             await connected_client.set_delayed_charging(evse_id=evse_id, enabled=False)
             settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-            assert settings["delayed_charging"]["value"] is False  # type: ignore
+            assert settings["delayed_charging"]["value"] is False
         finally:
             await _restore_active_profile(connected_client, evse_id, active_before)
 
@@ -226,7 +244,7 @@ class TestPriceBasedCharging:
     async def test_set_price_based_charging_settings(self, connected_client: BlueCurrentClient, evse_id: str):
         async def _get_price_based_charging() -> dict:
             settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-            return settings["price_based_charging"]  # type: ignore
+            return settings["price_based_charging"]
 
         if (await _get_price_based_charging())["permission"] != "write":
             skip(reason="No permission to change the price-based charging settings.")
@@ -247,14 +265,14 @@ class TestPriceBasedCharging:
                 evse_id=evse_id, expected_departure_time=time(6, 30), expected_kwh=25.1, minimum_kwh=10
             )
             after = await _get_price_based_charging()
-            assert after["expected_leave_time"] == "06:30"
+            assert after["expected_departure_time"] == "06:30"
             assert after["expected_kwh"] == 25.1
             assert after["minimum_kwh"] == 10
 
-            if before.get("expected_leave_time"):
+            if before.get("expected_departure_time"):
                 await connected_client.set_price_based_charging_settings(
                     evse_id=evse_id,
-                    expected_departure_time=before["expected_leave_time"],
+                    expected_departure_time=before["expected_departure_time"],
                     expected_kwh=before["expected_kwh"],
                     minimum_kwh=before["minimum_kwh"],
                 )
@@ -264,7 +282,7 @@ class TestPriceBasedCharging:
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
     async def test_set_price_based_charging(self, connected_client: BlueCurrentClient, evse_id: str):
         settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-        if settings["price_based_charging"]["permission"] != "write":  # type: ignore
+        if settings["price_based_charging"]["permission"] != "write":
             skip(reason="No permission to change price-based charging.")
         status = await connected_client.get_charge_point_status(evse_id=evse_id)
         if status["activity"] == "charging":
@@ -275,10 +293,10 @@ class TestPriceBasedCharging:
         try:
             await connected_client.set_price_based_charging(evse_id=evse_id, enabled=True)
             settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-            assert settings["price_based_charging"]["value"] is True  # type: ignore
+            assert settings["price_based_charging"]["value"] is True
             await connected_client.set_price_based_charging(evse_id=evse_id, enabled=False)
             settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-            assert settings["price_based_charging"]["value"] is False  # type: ignore
+            assert settings["price_based_charging"]["value"] is False
         finally:
             await _restore_active_profile(connected_client, evse_id, active_before)
 
@@ -292,26 +310,30 @@ class TestRestApi:
     async def test_get_contracts(self, connected_client: BlueCurrentClient):
         contracts = await connected_client.get_contracts()
         assert len(contracts) > 0
+        assert_model(contracts, list[Contract])
         assert "contract_id" in contracts[0]
 
     async def test_get_charge_point_status(self, connected_client: BlueCurrentClient, evse_id: str):
         status = await connected_client.get_charge_point_status(evse_id)
+        assert_model(status, ChargePointStatus)
         assert status["evse_id"] == evse_id
         assert "activity" in status
 
     async def test_get_grids(self, connected_client: BlueCurrentClient):
         grids = await connected_client.get_grids()
         assert len(grids) > 0
+        assert_model(grids, list[Grid])
         assert "id" in grids[0]
 
     async def test_get_transactions(self, connected_client: BlueCurrentClient, evse_id: str):
         transactions = await connected_client.get_transactions(evse_id)
+        assert_model(transactions, TransactionsPage)
         assert "transactions" in transactions
 
     async def test_iterate_transactions(self, connected_client: BlueCurrentClient, evse_id: str):
         transactions = await connected_client.get_transactions(evse_id)
         # If there are less than three pages, there might be fewer than 30.
-        if transactions["total_pages"] < 3:  # type: ignore
+        if transactions["total_pages"] < 3:
             skip("Not enough transactions.")
         n_transactions = 0
         # Verify pagination works correctly - we get 30 unique transactions from multiple pages.

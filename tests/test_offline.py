@@ -14,12 +14,21 @@ from fake_socket import (
     make_fake_connect,
     make_reconnecting_connect,
 )
+from models_check import assert_model
 from pytest import MonkeyPatch, raises
 
 from pybluecurrent import BlueCurrentClient, Weekday
 from pybluecurrent.client import _redact
 from pybluecurrent.client import logger as client_logger
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException, ConnectionLost, RequestTimeout
+from pybluecurrent.models import (
+    Account,
+    ChargeCard,
+    ChargePoint,
+    ChargePointSettings,
+    GridStatus,
+    SustainabilityStatus,
+)
 
 
 async def _drain(client: BlueCurrentClient) -> None:
@@ -144,22 +153,26 @@ class TestOfflineCommands:
     async def test_get_charge_points(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
         charge_points = await offline_client.get_charge_points()
+        assert_model(charge_points, list[ChargePoint])
         assert charge_points[0]["evse_id"] == "BCU123456"
 
     async def test_get_grid_status(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_GRID_STATUS", load_fixture("grid_status"))
         status = await offline_client.get_grid_status("BCU123456")
+        assert_model(status, GridStatus)
         assert status["id"] == "GRID-BCU123456"
         assert status["grid_actual_p1"] == 1
 
     async def test_get_charge_point_settings(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_CH_SETTINGS", load_fixture("charge_point_settings"))
         settings = await offline_client.get_charge_point_settings("BCU123456")
+        assert_model(settings, ChargePointSettings)
         assert settings["evse_id"] == "BCU123456"
 
     async def test_get_charge_cards(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_CHARGE_CARDS", load_fixture("charge_cards"))
         cards = await offline_client.get_charge_cards()
+        assert_model(cards, list[ChargeCard])
         assert cards[0]["uid"] == "A1B2C3D4E5F6"
         assert cards[0]["date_created"] == date(2023, 6, 27)
         assert cards[0]["date_became_invalid"] is None
@@ -167,12 +180,14 @@ class TestOfflineCommands:
     async def test_get_account(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_ACCOUNT", load_fixture("account"))
         account = await offline_client.get_account()
+        assert_model(account, Account)
         assert account["full_name"] == "Your Full Name"
         assert account["first_login_app"] == datetime(2020, 1, 15, 13, 33, 52)
 
     async def test_get_sustainability_status(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_SUSTAINABILITY_STATUS", load_fixture("sustainability_status"))
         status = await offline_client.get_sustainability_status()
+        assert_model(status, SustainabilityStatus)
         assert status == {"trees": 1, "co2": 12.345}
 
     async def test_error_is_raised(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):

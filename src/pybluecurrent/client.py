@@ -2,11 +2,11 @@ from asyncio import CancelledError, Event, Lock, Task, create_task, get_running_
 from asyncio import TimeoutError as AsyncTimeoutError
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
-from datetime import date, datetime, time
+from datetime import time
 from json import JSONDecodeError, dumps, loads
 from logging import getLogger
 from random import uniform
-from typing import Any, AsyncIterable, AsyncIterator, Iterable
+from typing import Any, AsyncIterable, AsyncIterator, Iterable, cast
 from uuid import uuid4
 
 from asyncio_multisubscriber_queue import MultisubscriberQueue
@@ -24,9 +24,42 @@ from pybluecurrent.exceptions import (
     RequestTimeout,
     _GiveUp,
 )
-from pybluecurrent.utilities import format_time, parse_datetime_keys, parse_list_datetime_keys
+from pybluecurrent.models import (
+    Account,
+    ChargeCard,
+    ChargePoint,
+    ChargePointSettings,
+    ChargePointStatus,
+    Contract,
+    Grid,
+    GridStatus,
+    SustainabilityStatus,
+    Transaction,
+    TransactionsPage,
+)
+from pybluecurrent.utilities import (
+    format_time,
+    parse_datetime_keys,
+    parse_list_datetime_keys,
+    rename_key,
+)
 
 logger = getLogger(__name__)
+
+
+def _normalize_profile_keys(data: dict[str, Any]) -> None:
+    """Rewrite the smart-charging profile read keys to the canonical setter names, in place.
+
+    The backend reads back a schedule under different keys than the setters write; normalize
+    them so the read and write vocabularies match (``days``, ``expected_departure_time``).
+    """
+    delayed = data.get("delayed_charging")
+    if isinstance(delayed, dict):
+        rename_key(delayed, "selected_days", "days")
+    price_based = data.get("price_based_charging")
+    if isinstance(price_based, dict):
+        rename_key(price_based, "expected_leave_time", "expected_departure_time")
+
 
 # Identity sentinel broadcast on the queue when the receive handler exits, so in-flight _receive
 # waiters wake immediately instead of blocking until their own deadline.
@@ -279,7 +312,7 @@ class BlueCurrentClient:
         if self._closed is not None:
             raise self._closed
 
-    async def get_account(self) -> dict[str, bool | datetime | str]:
+    async def get_account(self) -> Account:
         """
         Get account information.
 
@@ -299,7 +332,8 @@ class BlueCurrentClient:
         """
         result = await self._request(dict(command="GET_ACCOUNT"), "ACCOUNT")
         del result["object"]
-        return parse_datetime_keys(result, formats={"first_login_app": (("%d-%b-%y", "%Y-%m-%dT%H:%M:%S"), False)})
+        parse_datetime_keys(result, formats={"first_login_app": (("%d-%b-%y", "%Y-%m-%dT%H:%M:%S"), False)})
+        return cast(Account, result)
 
     async def get_api_token(self) -> str:
         """
@@ -333,7 +367,7 @@ class BlueCurrentClient:
         response.raise_for_status()
         return await self.get_api_token()
 
-    async def get_charge_cards(self) -> list[dict[str, date | int | str | None]]:
+    async def get_charge_cards(self) -> list[ChargeCard]:
         """
         Get your charge cards:
 
@@ -351,7 +385,7 @@ class BlueCurrentClient:
             }
         """
         result = (await self._request(dict(command="GET_CHARGE_CARDS"), "CHARGE_CARDS"))["cards"]
-        return parse_list_datetime_keys(
+        parse_list_datetime_keys(
             result,
             formats={
                 "date_created": ("%Y-%m-%d", True),
@@ -359,8 +393,9 @@ class BlueCurrentClient:
                 "date_became_invalid": ("%Y-%m-%d", True),
             },
         )
+        return cast(list[ChargeCard], result)
 
-    async def get_charge_points(self) -> list[dict[str, bool | dict | str]]:
+    async def get_charge_points(self) -> list[ChargePoint]:
         """
         Get a list of your charge points.
 
@@ -381,7 +416,7 @@ class BlueCurrentClient:
                                          "customer_name": "Your Name", "valid": 1},
                 "tariff":  {"tariff_id","NLBCUT58", "price_ex_vat": 0.2, "start_price_ex_vat": 0, "price_in_vat": 0.242,
                             "start_price_in_vat": 0, "currency": "EUR", "vat_percentage": 21},
-                "plug_and_charge_notification": False,
+                "plug_and_charge_notification": {"value": False, "permission": "write"},
                 "plug_and_charge": {"value": True, "permission": "write"},
                 "led_interaction": {"value": False, "permission": "read"},
                 "publish_location": {"value": False, "permission": "write"},
@@ -391,13 +426,16 @@ class BlueCurrentClient:
                 "location": {"x_coord": 50.1234, "y_coord": 5.01234, "street": "Europalaan", "housenumber": "100",
                              "zipcode": "3526KS", "city": "Utrecht", "country": "NL"},
                 "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00",
-                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5]},
+                                     "end_time": "07:00", "days": [1, 2, 3, 4, 5]},
                 "price_based_charging": {"value": False, "permission": "write"}
             }
         """
-        return (await self._request(dict(command="GET_CHARGE_POINTS"), "CHARGE_POINTS"))["data"]
+        data = (await self._request(dict(command="GET_CHARGE_POINTS"), "CHARGE_POINTS"))["data"]
+        for charge_point in data:
+            _normalize_profile_keys(charge_point)
+        return data
 
-    async def get_charge_point_settings(self, evse_id: str) -> dict[str, bool | dict[str, Any] | str]:
+    async def get_charge_point_settings(self, evse_id: str) -> ChargePointSettings:
         """
         Get the settings of a charge point.
 
@@ -423,18 +461,20 @@ class BlueCurrentClient:
                 "model_type": "H:MOVE-C32T2",
                 "is_cable": True,
                 "chargepoint_type": "HIDDEN",
-                "plug_and_charge_notification": False,
+                "plug_and_charge_notification": {"value": False, "permission": "write"},
                 "led_intensity": {"value": 0, "permission": "none"},
                 "led_interaction": {"value": False, "permission": "none"},
                 "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00",
-                                     "end_time": "07:00", "selected_days": [1, 2, 3, 4, 5]},
-                "price_based_charging": {"value": True, "permission": "write", "expected_leave_time": "07:00",
+                                     "end_time": "07:00", "days": [1, 2, 3, 4, 5]},
+                "price_based_charging": {"value": True, "permission": "write", "expected_departure_time": "07:00",
                                          "expected_kwh": 25, "minimum_kwh": 10}
             }
         """
-        return (await self._request(dict(command="GET_CH_SETTINGS", evse_id=evse_id), "CH_SETTINGS"))["data"]
+        data = (await self._request(dict(command="GET_CH_SETTINGS", evse_id=evse_id), "CH_SETTINGS"))["data"]
+        _normalize_profile_keys(data)
+        return data
 
-    async def get_grid_status(self, evse_id: str) -> dict[str, int | str]:
+    async def get_grid_status(self, evse_id: str) -> GridStatus:
         """
         Get the grid status associated to a charge point.
 
@@ -458,7 +498,7 @@ class BlueCurrentClient:
         """Does not work"""
         return await self._request(dict(command="GET_SESSIONS"), "SESSIONS")
 
-    async def get_sustainability_status(self) -> dict[str, float | int]:
+    async def get_sustainability_status(self) -> SustainabilityStatus:
         """
         Get statistics on the sustainability of all your charge points.
 
@@ -468,7 +508,7 @@ class BlueCurrentClient:
         """
         result = await self._request(dict(command="GET_SUSTAINABILITY_STATUS"), "SUSTAINABILITY_STATUS")
         result.pop("object")
-        return result
+        return cast(SustainabilityStatus, result)
 
     async def set_plug_and_charge_charge_card(self, evse_id: str, uid: str | None = None) -> None:
         """
@@ -533,7 +573,7 @@ class BlueCurrentClient:
                 raise BlueCurrentException(status)
             return status
 
-    async def get_charge_point_status(self, evse_id: str) -> dict[str, datetime | float | int | str | None]:
+    async def get_charge_point_status(self, evse_id: str) -> ChargePointStatus:
         """
         Get the status of a charge point.
 
@@ -568,13 +608,14 @@ class BlueCurrentClient:
         )
         response.raise_for_status()
         result = response.json()["data"]
-        return parse_datetime_keys(
+        parse_datetime_keys(
             result,
             formats={
                 "start_datetime": ("%Y%m%d %H:%M:%S", False),
                 "stop_datetime": ("%Y%m%d %H:%M:%S", False),
             },
         )
+        return cast(ChargePointStatus, result)
 
     async def set_delayed_charging(self, evse_id: str, enabled: bool) -> None:
         """
@@ -657,8 +698,7 @@ class BlueCurrentClient:
         Args:
             evse_id: A charge point ID.
             expected_departure_time: The time the vehicle is expected to leave, as a time or a
-                "HH:MM" string. Note that this is read back as "expected_leave_time" from the
-                price_based_charging settings.
+                "HH:MM" string. Read back under the same key from the price_based_charging settings.
             expected_kwh: The amount of energy, in kWh, expected to be charged before departure.
             minimum_kwh: The amount of energy, in kWh, to charge immediately regardless of price.
         """
@@ -687,16 +727,14 @@ class BlueCurrentClient:
             ValueError: If no smart charging profile is active, so there is nothing to override.
         """
         settings = await self.get_charge_point_settings(evse_id)
-        price_based: Any = settings["price_based_charging"]
-        delayed: Any = settings["delayed_charging"]
-        if price_based["value"]:
+        if settings["price_based_charging"]["value"]:
             await self._post("overridechargingprofiles", dict(boost=True, evse_id=evse_id))
-        elif delayed["value"]:
+        elif settings["delayed_charging"]["value"]:
             await self._post("overridedelayedchargingtimeout", dict(evse_id=evse_id))
         else:
             raise ValueError(f"No active smart charging profile to boost for {evse_id}.")
 
-    async def get_contracts(self) -> list[dict[str, str]]:
+    async def get_contracts(self) -> list[Contract]:
         """
         Get your contracts.
 
@@ -721,7 +759,7 @@ class BlueCurrentClient:
         response.raise_for_status()
         return response.json()["contracts"]
 
-    async def get_grids(self) -> list[dict[str, bool | dict[str, str] | str]]:
+    async def get_grids(self) -> list[Grid]:
         """
         Get your grid connections.
 
@@ -745,7 +783,7 @@ class BlueCurrentClient:
         response.raise_for_status()
         return response.json()["grids"]
 
-    async def get_transactions(self, evse_id: str, newest_first: bool = True, page: int = 1) -> dict[str, Any]:
+    async def get_transactions(self, evse_id: str, newest_first: bool = True, page: int = 1) -> TransactionsPage:
         """
         Get a list of transactions.
 
@@ -800,7 +838,7 @@ class BlueCurrentClient:
         )
         return result
 
-    async def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> AsyncIterable[dict[str, Any]]:
+    async def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> AsyncIterable[Transaction]:
         """
         Iterate through your transactions.
 

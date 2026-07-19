@@ -49,6 +49,12 @@ def _parse_datetime(value: str, datetime_format: str | tuple[str, ...]) -> datet
     raise ValueError(f"time data {value!r} does not match any of {candidates!r}")
 
 
+def rename_key(source: dict[str, Any], old: str, new: str) -> None:
+    """Rename a key in place if present, leaving the dict untouched when old is absent."""
+    if old in source:
+        source[new] = source.pop(old)
+
+
 def parse_list_datetime_keys(
     source: list[dict[str, Any]], formats: dict[str, tuple[str | tuple[str, ...], bool]]
 ) -> list[dict[str, Any]]:
