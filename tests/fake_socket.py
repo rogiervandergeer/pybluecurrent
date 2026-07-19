@@ -128,3 +128,36 @@ def make_fake_connect(socket: FakeSocket) -> Callable[..., FakeConnection]:
         return FakeConnection(socket)
 
     return fake_connect
+
+
+class FailingConnection:
+    """A connection whose ``__aenter__`` raises — simulates a connect that never establishes.
+
+    Use it in a :func:`make_reconnecting_connect` sequence to model a transport failure (``OSError``)
+    during a reconnect attempt.
+    """
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    async def __aenter__(self) -> Any:
+        raise self._error
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
+def make_reconnecting_connect(factory: Callable[[], Any]) -> Callable[..., Any]:
+    """Build a ``connect`` replacement that returns ``factory()`` for every new connection.
+
+    Unlike :func:`make_fake_connect` (which reuses one socket), this asks ``factory`` for a fresh
+    connection each time the client (re)connects — mirroring a real ``connect()`` that yields a new
+    socket per call. ``factory`` returns an async context manager: a :class:`FakeConnection` wrapping
+    a fresh :class:`FakeSocket`, or a :class:`FailingConnection` to simulate a failed attempt. Pass a
+    closure over an iterator to script a sequence of drops / failures / successes.
+    """
+
+    def fake_connect(*args: Any, **kwargs: Any) -> Any:
+        return factory()
+
+    return fake_connect

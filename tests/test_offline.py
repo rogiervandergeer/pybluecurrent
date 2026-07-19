@@ -2,8 +2,17 @@ from asyncio import CancelledError, create_task, gather, sleep
 from contextlib import suppress
 from datetime import date, datetime, time
 
-from fake_rest import FakeRest
-from fake_socket import FAKE_CUSTOMER_ID, FAKE_TOKEN, FakeSocket, load_fixture, make_fake_connect
+from fake_rest import FakeRest, make_fake_async_client
+from fake_socket import (
+    FAKE_CUSTOMER_ID,
+    FAKE_TOKEN,
+    FailingConnection,
+    FakeConnection,
+    FakeSocket,
+    load_fixture,
+    make_fake_connect,
+    make_reconnecting_connect,
+)
 from pytest import MonkeyPatch, raises
 
 from pybluecurrent import BlueCurrentClient, Weekday
@@ -11,11 +20,20 @@ from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException,
 
 
 async def _drain(client: BlueCurrentClient) -> None:
-    """Yield control until the handler has finished shutting down (``_closed`` is set)."""
+    """Yield control until the handler has finished shutting down (``_drop_reason`` is set)."""
     for _ in range(10):
         await sleep(0)
-        if client._closed is not None:
+        if client._drop_reason is not None or client._closed is not None:
             break
+
+
+async def _wait_until(pred, limit: int = 2000) -> None:
+    """Yield control to the event loop until ``pred()`` holds (or fail after ``limit`` turns)."""
+    for _ in range(limit):
+        if pred():
+            return
+        await sleep(0)
+    raise AssertionError("condition was not reached")
 
 
 async def _expect_auth_failure(monkeypatch: MonkeyPatch, socket: FakeSocket, **client_kwargs) -> None:
@@ -480,3 +498,261 @@ class TestOfflineLifecycle:
         assert issubclass(RequestTimeout, BlueCurrentException)
         assert issubclass(ConnectionLost, BlueCurrentException)
         assert issubclass(AuthenticationFailed, (BlueCurrentException, ValueError))
+
+
+def _sequence(*connections):
+    """A connect factory that hands out ``connections`` in order (fails loudly if over-consumed)."""
+    it = iter(connections)
+
+    def factory():
+        try:
+            return next(it)
+        except StopIteration:  # pragma: no cover - a test scripting bug, surfaced immediately
+            raise AssertionError("unexpected extra connect attempt")
+
+    return factory
+
+
+def _setup_reconnecting(monkeypatch, fake_rest, factory, *, uniform_value=1.0):
+    """Wire an auto-reconnecting client to a scripted transport; return (client, recorded_delays).
+
+    ``sleep`` is replaced with a no-op that records the requested backoff (so tests run instantly and
+    can assert the backoff schedule), and ``uniform`` is pinned so ``delay == backoff``.
+    """
+    monkeypatch.setattr("pybluecurrent.client.connect", make_reconnecting_connect(factory))
+    monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
+    monkeypatch.setattr("pybluecurrent.client.uniform", lambda _a, _b: uniform_value)
+    delays: list[float] = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+        await sleep(0)  # yield so the rest of the loop makes progress, but never actually wait
+
+    monkeypatch.setattr("pybluecurrent.client.sleep", fake_sleep)
+    client = BlueCurrentClient("username", "password")
+    return client, delays
+
+
+def _validate_count(*sockets):
+    return sum(m.get("command") == "VALIDATE_PASSWORD" for s in sockets for m in s.sent)
+
+
+class TestReconnect:
+    """The auto-reconnect supervisor (auto_reconnect=True), driven by a reconnecting fake transport."""
+
+    async def test_transparent_reconnect_reuses_token(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, second = FakeSocket(), FakeSocket()
+        second.on("GET_GRID_STATUS", {"object": "GRID_STATUS", "data": {"id": "GRID-2"}})
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), FakeConnection(second))
+        )
+        async with client:
+            token = client.token
+            first.close()
+            await _wait_until(lambda: client.socket is second and client._connected.is_set())
+            assert client.token == token  # reused the cached token — no re-login
+            assert _validate_count(second) == 0
+            assert (await client.get_grid_status("A"))["id"] == "GRID-2"
+
+    async def test_inflight_call_fails_then_client_recovers(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, second = FakeSocket(), FakeSocket()
+        second.on("GET_GRID_STATUS", {"object": "GRID_STATUS", "data": {"id": "GRID-2"}})
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), FakeConnection(second))
+        )
+        async with client:
+            waiter = create_task(client._receive("NEVER"))
+            await sleep(0)
+            first.close()
+            with raises(ConnectionLost):
+                await waiter  # in-flight call fails, not retried
+            await _wait_until(lambda: client.socket is second and client._connected.is_set())
+            assert (await client.get_grid_status("A"))["id"] == "GRID-2"  # ...but the client recovered
+
+    async def test_new_call_blocks_until_reconnected(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, second = FakeSocket(), FakeSocket()
+        second.responder.pop("HELLO")  # withhold the reconnect handshake until we release it
+        second.on("GET_GRID_STATUS", {"object": "GRID_STATUS", "data": {"id": "GRID-2"}})
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), FakeConnection(second))
+        )
+        async with client:
+            first.close()
+            await _wait_until(lambda: client.socket is second and not client._connected.is_set())
+            call = create_task(client.get_grid_status("A"))
+            for _ in range(10):
+                await sleep(0)
+            assert not call.done()  # gated: connection not ready yet
+            second.feed({"object": "HELLO"})  # release the reconnect handshake
+            assert (await call)["id"] == "GRID-2"
+
+    async def test_backoff_grows_and_caps(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, final = FakeSocket(), FakeSocket()
+        failures = [FailingConnection(OSError("boom")) for _ in range(5)]
+        client, delays = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), *failures, FakeConnection(final))
+        )
+        client.reconnect_initial_backoff = 1.0
+        client.reconnect_max_backoff = 8.0
+        client.reconnect_backoff_multiplier = 2.0
+        async with client:
+            first.close()
+            await _wait_until(lambda: client.socket is final and client._connected.is_set())
+            assert delays == [1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
+
+    async def test_transport_failure_keeps_token(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, final = FakeSocket(), FakeSocket()
+        client, _ = _setup_reconnecting(
+            monkeypatch,
+            fake_rest,
+            _sequence(FakeConnection(first), FailingConnection(OSError()), FakeConnection(final)),
+        )
+        async with client:
+            token = client.token
+            first.close()
+            await _wait_until(lambda: client.socket is final and client._connected.is_set())
+            assert client.token == token
+            assert len(client._login_times) == 1  # only the initial login; the transport retry issued none
+
+    async def test_backoff_resets_after_stable_uptime(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        clock = [1000.0]
+        first, second, third = FakeSocket(), FakeSocket(), FakeSocket()
+        client, delays = _setup_reconnecting(
+            monkeypatch,
+            fake_rest,
+            _sequence(
+                FakeConnection(first),
+                FailingConnection(OSError()),
+                FakeConnection(second),
+                FakeConnection(third),
+            ),
+        )
+        monkeypatch.setattr(client, "_now", lambda: clock[0])
+        client.reconnect_initial_backoff = 1.0
+        client.reconnect_max_backoff = 100.0
+        client.reconnect_backoff_multiplier = 2.0
+        client.reconnect_stable_period = 30.0
+        async with client:
+            first.close()  # drop 1 (uptime 0): one failure grows backoff 1->2, then success on `second`
+            await _wait_until(lambda: client.socket is second and client._connected.is_set())
+            assert delays == [1.0, 2.0]
+            clock[0] = 1100.0  # long uptime (100 >= 30) before drop 2 -> backoff resets to initial
+            second.close()
+            await _wait_until(lambda: client.socket is third and client._connected.is_set())
+            assert delays[2] == 1.0
+
+    async def test_backoff_kept_after_short_uptime(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        clock = [1000.0]
+        first, second, third = FakeSocket(), FakeSocket(), FakeSocket()
+        client, delays = _setup_reconnecting(
+            monkeypatch,
+            fake_rest,
+            _sequence(
+                FakeConnection(first),
+                FailingConnection(OSError()),
+                FakeConnection(second),
+                FakeConnection(third),
+            ),
+        )
+        monkeypatch.setattr(client, "_now", lambda: clock[0])
+        client.reconnect_initial_backoff = 1.0
+        client.reconnect_max_backoff = 100.0
+        client.reconnect_backoff_multiplier = 2.0
+        client.reconnect_stable_period = 30.0
+        async with client:
+            first.close()  # drop 1: backoff grows to 2 via one failure, then success
+            await _wait_until(lambda: client.socket is second and client._connected.is_set())
+            assert delays == [1.0, 2.0]
+            second.close()  # drop 2, short uptime (0 < 30) -> backoff NOT reset, stays 2
+            await _wait_until(lambda: client.socket is third and client._connected.is_set())
+            assert delays[2] == 2.0
+
+    async def test_reconnect_gives_up_after_repeated_logins(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first = FakeSocket()
+        # Each reconnect socket rejects HELLO (a stale-token signal), so the token is cleared and a
+        # fresh login attempted every cycle; the client stops after reconnect_max_relogins of them.
+        reconnects = [FakeSocket() for _ in range(4)]
+        for s in reconnects:
+            s.on("HELLO", {"object": "ERROR", "error": 1, "message": "Invalid Auth Token"})
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), *(FakeConnection(s) for s in reconnects))
+        )
+        client.reconnect_max_relogins = 2
+        async with client:
+            first.close()
+            await _wait_until(lambda: client._closed is not None)
+            assert isinstance(client._closed, ConnectionLost)
+            assert client._connected.is_set()
+            assert _validate_count(first, *reconnects) == 2  # never issues a 3rd VALIDATE_PASSWORD
+            with raises(ConnectionLost):
+                await client.get_grid_status("A")  # gated call fails promptly, no hang
+
+    async def test_bad_credentials_stops_reconnect(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, reject_hello, reject_login = FakeSocket(), FakeSocket(), FakeSocket()
+        reject_hello.on("HELLO", {"object": "ERROR", "error": 1, "message": "Invalid Auth Token"})
+        reject_login.on("VALIDATE_PASSWORD", {"object": "STATUS_PASSWORD", "accepted": False})
+        client, _ = _setup_reconnecting(
+            monkeypatch,
+            fake_rest,
+            _sequence(FakeConnection(first), FakeConnection(reject_hello), FakeConnection(reject_login)),
+        )
+        async with client:
+            first.close()
+            await _wait_until(lambda: client._closed is not None)
+            assert isinstance(client._closed, AuthenticationFailed)  # permanent — no retry loop
+            with raises(AuthenticationFailed):
+                await client.get_grid_status("A")
+
+    async def test_clean_shutdown(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, second = FakeSocket(), FakeSocket()
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), FakeConnection(second))
+        )
+        async with client:
+            supervisor = client._supervisor
+            first.close()
+            await _wait_until(lambda: client.socket is second and client._connected.is_set())
+        assert supervisor is not None and supervisor.done()
+        assert client.consumer is None and client.socket is None
+        assert client.connection is None and client.httpx_client is None
+        await client.__aexit__(None, None, None)  # idempotent
+
+    async def test_rest_transport_survives_reconnect(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, second = FakeSocket(), FakeSocket()
+        second.responder.pop("HELLO")  # keep the reconnect pending (mid-backoff window)
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), FakeConnection(second))
+        )
+        async with client:
+            httpx = client.httpx_client
+            first.close()
+            await _wait_until(lambda: client.socket is second and not client._connected.is_set())
+            # REST transport is untouched by the websocket drop/reconnect — same client, still alive.
+            assert client.httpx_client is httpx is not None
+            second.feed({"object": "HELLO"})  # let it finish so shutdown is clean
+
+    async def test_auto_reconnect_false_fast_fails(
+        self, monkeypatch: MonkeyPatch, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
+        monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
+        client = BlueCurrentClient("username", "password")
+        client.auto_reconnect = False
+        async with client:
+            assert client._supervisor is None
+            fake_socket.close()
+            await _drain(client)
+            with raises(ConnectionLost):
+                await client.get_grid_status("A")
+
+    async def test_first_connect_failure_starts_no_supervisor(
+        self, monkeypatch: MonkeyPatch, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_socket.on("VALIDATE_PASSWORD", {"object": "STATUS_PASSWORD", "accepted": False})
+        monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
+        monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
+        client = BlueCurrentClient("username", "password")
+        with raises(AuthenticationFailed):
+            await client.__aenter__()
+        assert client._supervisor is None
+        assert client.consumer is None and client.socket is None

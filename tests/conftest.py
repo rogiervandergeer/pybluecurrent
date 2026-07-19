@@ -29,10 +29,16 @@ def fake_rest() -> FakeRest:
 async def offline_client(
     monkeypatch: MonkeyPatch, fake_socket: FakeSocket, fake_rest: FakeRest
 ) -> AsyncGenerator[BlueCurrentClient, None]:
-    """A connected client backed by ``fake_socket`` and ``fake_rest`` — no credentials, no network."""
+    """A connected client backed by ``fake_socket`` and ``fake_rest`` — no credentials, no network.
+
+    Auto-reconnect is disabled here so a dropped connection stays terminal, matching what the
+    transport/command/lifecycle tests assert. The reconnect supervisor has its own tests (TestReconnect).
+    """
     monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
     monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
-    async with BlueCurrentClient("username", "password") as client:
+    client = BlueCurrentClient("username", "password")
+    client.auto_reconnect = False
+    async with client:
         yield client
 
 
