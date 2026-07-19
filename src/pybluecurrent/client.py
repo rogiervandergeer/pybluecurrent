@@ -39,16 +39,14 @@ class BlueCurrentClient:
     # Two-phase commands (set_status, unlock_connector, soft_reset) await a STATUS_ verdict that the
     # backend renders behind its own ~30s ceiling — the answer lands just after 30s, so wait longer.
     command_timeout: int = 60
-    # Auto-reconnect: a supervisor keeps the connection alive for the lifetime of ``async with``,
-    # reconnecting after drops with exponential backoff and reusing the cached token (no re-login).
+    # Auto-reconnect: a supervisor reconnects after drops with exponential backoff, reusing the token.
     auto_reconnect: bool = True
     reconnect_initial_backoff: float = 1.0
     reconnect_max_backoff: float = 60.0
     reconnect_backoff_multiplier: float = 2.0
-    reconnect_stable_period: float = 30.0  # uptime before the backoff resets to initial (flap guard)
+    reconnect_stable_period: float = 30.0  # uptime before the backoff resets to initial
     reconnect_wait_timeout: float = 120.0  # max a call blocks waiting for a reconnect
-    # A reconnect reuses the cached token; a rejected token means logging in again. These control how
-    # many logins may happen within a window before the client stops trying to reconnect.
+    # Stop reconnecting after this many logins within the window (a reconnect normally reuses the token).
     reconnect_relogin_window: float = 300.0
     reconnect_max_relogins: int = 3
 
@@ -88,13 +86,10 @@ class BlueCurrentClient:
         self._last_connect = 0.0
         self._login_times = deque()
         try:
-            # First connect inline so a first-connect failure (bad creds, hello timeout) surfaces
-            # directly rather than silently entering a reconnect loop.
+            # Connect inline so a first-connect failure (bad creds, hello timeout) surfaces directly.
             await self._connect()
         except BaseException:
-            # A failure here would otherwise leak the socket, the handler task, and the httpx client,
-            # since __aexit__ never runs when __aenter__ raises.
-            await self._teardown()
+            await self._teardown()  # __aexit__ won't run when __aenter__ raises; don't leak the transport
             raise
         self._connected.set()
         if self.auto_reconnect:
@@ -106,10 +101,9 @@ class BlueCurrentClient:
         self.logger.debug("Closing BlueCurrent connection")
         self._shutting_down = True
         self._closed = self._closed or ConnectionLost("Client is shutting down.")
-        self._connected.set()  # release any gated waiter so it sees _closed and raises promptly
+        self._connected.set()  # release any gated waiter so it sees _closed
         if self._supervisor is not None:
-            # Stop the supervisor first so it can't race a reconnect against the teardown below. It
-            # may be sleeping in backoff, awaiting the consumer, or mid-_connect — cancel handles all.
+            # Stop the supervisor first so it can't race a reconnect against the teardown below.
             self._supervisor.cancel()
             with suppress(CancelledError):
                 await self._supervisor
@@ -117,15 +111,13 @@ class BlueCurrentClient:
         await self._teardown(exc_type, exc_val, exc_tb)
 
     def _now(self) -> float:
-        """Monotonic time seam (the running loop's clock) — indirection so tests can drive timing."""
+        """The running loop's clock, behind a seam so tests can drive reconnect timing."""
         return get_running_loop().time()
 
     async def _connect(self) -> None:
-        """Build one live connection (socket + handler + httpx) and authenticate.
+        """Build and authenticate one connection, reusing the cached token when present.
 
-        Reuses the cached token when present (a reconnect normally performs no login); only performs a
-        fresh login when the token is missing. Raises on any failure,
-        leaving partial state for the caller to tear down. Safe to call after a prior teardown.
+        Raises on failure, leaving partial state for the caller to tear down.
         """
         self.connection = connect(self.socket_url, user_agent_header=self._user_agent)
         self.socket = await self.connection.__aenter__()
@@ -141,15 +133,9 @@ class BlueCurrentClient:
         self._last_connect = self._now()
 
     async def _teardown_transport(self, exc_type=None, exc_val=None, exc_tb=None) -> None:
-        """Release the websocket transport (handler + socket), keeping the httpx client alive.
-
-        Used between reconnects so REST calls keep working during the backoff window. Safe to call
-        with any subset already torn down.
-        """
+        """Close the websocket transport (handler + socket) but keep the httpx client so REST keeps working."""
         if self.consumer is not None:
-            # Stop the handler before closing the socket it iterates, and actually await the
-            # cancellation so its exception is retrieved rather than left dangling.
-            self.consumer.cancel()
+            self.consumer.cancel()  # stop the handler and await it so its exception is retrieved
             with suppress(CancelledError):
                 await self.consumer
         if self.connection is not None:
@@ -160,10 +146,7 @@ class BlueCurrentClient:
         self.consumer = self.socket = self.connection = None
 
     async def _teardown(self, exc_type=None, exc_val=None, exc_tb=None) -> None:
-        """Full teardown: the websocket transport plus the httpx client.
-
-        Used by __aexit__ and the __aenter__ failure path. Safe with any subset already torn down.
-        """
+        """Full teardown: the websocket transport plus the httpx client."""
         await self._teardown_transport(exc_type, exc_val, exc_tb)
         if self.httpx_client is not None:
             try:
@@ -189,12 +172,7 @@ class BlueCurrentClient:
             self.logger.error("Reconnect supervisor exited unexpectedly", exc_info=exc)
 
     def _note_login_attempt(self) -> None:
-        """Record a login attempt, giving up rather than logging in yet again too often.
-
-        Called immediately before every ``_login()``. Keeps a rolling window of login timestamps and
-        gives up once another login would exceed ``reconnect_max_relogins`` within
-        ``reconnect_relogin_window``.
-        """
+        """Record a login attempt; give up before one would exceed ``reconnect_max_relogins`` in-window."""
         now = self._now()
         window = self.reconnect_relogin_window
         while self._login_times and now - self._login_times[0] > window:
@@ -228,13 +206,10 @@ class BlueCurrentClient:
             self._connected.set()  # never leave a waiter blocked forever
 
     async def _wait_for_drop(self) -> None:
-        """Return once the current connection's handler stops (the connection dropped).
-
-        Uses ``wait`` rather than ``await self.consumer`` so it neither re-raises the handler's
-        exception nor swallows the supervisor's own cancellation at shutdown.
-        """
+        """Block until the current handler task finishes (the connection dropped)."""
         if self.consumer is None:
             return
+        # wait(), not `await self.consumer`: don't re-raise the handler's error or eat our own cancel.
         await wait({self.consumer})
 
     def _grow_backoff(self) -> None:
@@ -243,8 +218,7 @@ class BlueCurrentClient:
     async def _reconnect_with_backoff(self) -> None:
         """Retry ``_connect`` with exponential backoff until connected, given up, or shutting down."""
         while not self._shutting_down:
-            # Clear before every attempt — the handshake's _login/_hello go through _send/_receive,
-            # which fast-fail on a stale _drop_reason left by the previous attempt.
+            # Clear each attempt: the handshake's _send/_receive fast-fail on a stale _drop_reason.
             self._drop_reason = None
             await sleep(self._backoff * uniform(0.5, 1.0))  # jitter to avoid synchronised retries
             if self._shutting_down:
@@ -256,33 +230,29 @@ class BlueCurrentClient:
             except _GiveUp:
                 raise  # gave up (from _note_login_attempt)
             except (OSError, ConnectionClosed, ConnectionLost):
-                # Pure transport failure (network down / mid-handshake drop): keep the token, retry.
-                await self._teardown_transport()
+                await self._teardown_transport()  # transport failure: keep the token and retry
                 self._grow_backoff()
             except (RequestTimeout, BlueCurrentException) as exc:
-                # Auth/hello-phase rejection: the cached token may be stale. Clear it so the next
-                # attempt logs in again; a timed-out login gets the maximum backoff.
+                # auth/hello rejected: the token may be stale, so log in again next attempt
                 self.token = None
                 await self._teardown_transport()
                 if isinstance(exc, RequestTimeout):
-                    self._backoff = self.reconnect_max_backoff
+                    self._backoff = self.reconnect_max_backoff  # a timed-out login backs off hardest
                 else:
                     self._grow_backoff()
             else:
                 return
 
     async def _await_connected(self) -> None:
-        """Block until the connection is ready (or fail fast) before issuing a websocket call.
+        """Wait for the connection before a call (bounded by ``reconnect_wait_timeout``), or fail fast.
 
-        A new call made during a reconnect waits for the supervisor to restore readiness, bounded by
-        ``reconnect_wait_timeout``. In-flight calls are unaffected — they fail via _send/_receive.
+        In-flight calls are unaffected — they fail via _send/_receive.
         """
         if self._closed is not None:
             raise self._closed
         if self._connected.is_set():
             return
         if not self.auto_reconnect:
-            # No supervisor will restore readiness — preserve today's fast-fail semantics.
             raise self._drop_reason or ConnectionLost("The websocket connection was closed.")
         try:
             await wait_for(self._connected.wait(), timeout=self.reconnect_wait_timeout)
@@ -913,9 +883,8 @@ class BlueCurrentClient:
             terminal.__cause__ = exc
             raise
         finally:
-            # Record why THIS connection dropped (transient — the supervisor clears it before the next
-            # attempt) and wake every in-flight waiter. The assignment is synchronous, so _drop_reason
-            # is set even if the queue.put below is cut short by cancellation.
+            # Record why this connection dropped and wake in-flight waiters. Synchronous, so it's set
+            # even if the queue.put below is cut short by cancellation.
             self._drop_reason = terminal
             await self.queue.put(_CONNECTION_CLOSED)
 
@@ -926,9 +895,7 @@ class BlueCurrentClient:
     async def _receive(self, obj: str, timeout: int = 10, flow_id: str | None = None) -> dict[str, Any]:
         terminal = self._closed or self._drop_reason
         if terminal is not None:
-            # The client is dead or the current connection dropped; don't subscribe and block for a
-            # reply that can't arrive. In-flight receives fail here rather than being retried.
-            raise terminal
+            raise terminal  # dead client or dropped connection: fail rather than block for a reply
         loop = get_running_loop()
         deadline = loop.time() + timeout
         with self.queue.queue() as q:
@@ -971,8 +938,7 @@ class BlueCurrentClient:
         try:
             await self.socket.send(dumps(data, ensure_ascii=False))
         except ConnectionClosed as exc:
-            # The socket dropped between the readiness gate and this send (a race the gate narrows but
-            # cannot close). Surface it as ConnectionLost like any other in-flight failure.
+            # Dropped between the readiness gate and the send; surface as ConnectionLost.
             raise ConnectionLost("The websocket connection was closed.") from exc
 
     @asynccontextmanager
