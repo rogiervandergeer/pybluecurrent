@@ -26,9 +26,21 @@ from pybluecurrent.exceptions import (
 )
 from pybluecurrent.utilities import format_time, parse_datetime_keys, parse_list_datetime_keys
 
+logger = getLogger(__name__)
+
 # Identity sentinel broadcast on the queue when the receive handler exits, so in-flight _receive
 # waiters wake immediately instead of blocking until their own deadline.
 _CONNECTION_CLOSED = object()
+
+# Frame fields masked before a received message is logged, so a token never reaches the logs.
+_SENSITIVE_KEYS = ("token", "Authorization")
+
+
+def _redact(message):
+    """Return the message with any sensitive fields masked, for safe logging."""
+    if isinstance(message, dict) and any(key in message for key in _SENSITIVE_KEYS):
+        return {key: ("***" if key in _SENSITIVE_KEYS else value) for key, value in message.items()}
+    return message
 
 
 class BlueCurrentClient:
@@ -58,7 +70,6 @@ class BlueCurrentClient:
         self.credentials: tuple[str | None, str | None] = (username, password)
         self.api_token: str | None = api_token
         self.customer_id: str | None = None
-        self.logger = getLogger("BlueCurrentClient")
         self.httpx_client: AsyncClient | None = None
         self.queue = MultisubscriberQueue()
         self.locks: defaultdict[str, Lock] = defaultdict(Lock)
@@ -77,7 +88,7 @@ class BlueCurrentClient:
         self._login_times: deque[float] = deque()
 
     async def __aenter__(self) -> "BlueCurrentClient":
-        self.logger.debug("Creating BlueCurrent websocket connection")
+        logger.debug("Creating BlueCurrent websocket connection")
         self._closed = None
         self._drop_reason = None
         self._shutting_down = False
@@ -98,7 +109,7 @@ class BlueCurrentClient:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        self.logger.debug("Closing BlueCurrent connection")
+        logger.debug("Closing BlueCurrent connection")
         self._shutting_down = True
         self._closed = self._closed or ConnectionLost("Client is shutting down.")
         self._connected.set()  # release any gated waiter so it sees _closed
@@ -142,7 +153,7 @@ class BlueCurrentClient:
             try:
                 await self.connection.__aexit__(exc_type, exc_val, exc_tb)
             except Exception:
-                self.logger.debug("Error closing websocket connection", exc_info=True)
+                logger.debug("Error closing websocket connection", exc_info=True)
         self.consumer = self.socket = self.connection = None
 
     async def _teardown(self, exc_type=None, exc_val=None, exc_tb=None) -> None:
@@ -152,7 +163,7 @@ class BlueCurrentClient:
             try:
                 await self.httpx_client.__aexit__(exc_type, exc_val, exc_tb)
             except Exception:
-                self.logger.debug("Error closing httpx client", exc_info=True)
+                logger.debug("Error closing httpx client", exc_info=True)
         self.httpx_client = None
 
     def _on_handler_done(self, task: Task) -> None:
@@ -161,7 +172,7 @@ class BlueCurrentClient:
             return
         exc = task.exception()
         if exc is not None:
-            self.logger.error("Websocket receive handler exited", exc_info=exc)
+            logger.error("Websocket receive handler exited", exc_info=exc)
 
     def _on_supervisor_done(self, task: Task) -> None:
         """Log an unexpected exit of the reconnect supervisor."""
@@ -169,7 +180,7 @@ class BlueCurrentClient:
             return
         exc = task.exception()
         if exc is not None:
-            self.logger.error("Reconnect supervisor exited unexpectedly", exc_info=exc)
+            logger.error("Reconnect supervisor exited unexpectedly", exc_info=exc)
 
     def _note_login_attempt(self) -> None:
         """Record a login attempt; give up before one would exceed ``reconnect_max_relogins`` in-window."""
@@ -188,7 +199,7 @@ class BlueCurrentClient:
                 await self._wait_for_drop()
                 if self._shutting_down:
                     break
-                self.logger.warning("Websocket connection dropped; reconnecting")
+                logger.warning("Websocket connection dropped; reconnecting")
                 self._connected.clear()  # gate new calls before tearing down the dead transport
                 await self._teardown_transport()
                 if self._now() - self._last_connect >= self.reconnect_stable_period:
@@ -197,10 +208,11 @@ class BlueCurrentClient:
                     await self._reconnect_with_backoff()
                 except _GiveUp as give_up:
                     await self._teardown_transport()  # release the giving-up attempt's partial transport
+                    logger.error("Reconnect abandoned: %s", give_up.reason)
                     self._closed = give_up.reason
                     self._connected.set()  # wake blocked waiters so they immediately re-raise _closed
                     return
-                self.logger.info("Reconnected")
+                logger.info("Reconnected")
                 self._connected.set()
         finally:
             self._connected.set()  # never leave a waiter blocked forever
@@ -220,7 +232,9 @@ class BlueCurrentClient:
         while not self._shutting_down:
             # Clear each attempt: the handshake's _send/_receive fast-fail on a stale _drop_reason.
             self._drop_reason = None
-            await sleep(self._backoff * uniform(0.5, 1.0))  # jitter to avoid synchronised retries
+            delay = self._backoff * uniform(0.5, 1.0)  # jitter to avoid synchronised retries
+            logger.debug("Reconnecting in %.1fs", delay)
+            await sleep(delay)
             if self._shutting_down:
                 return
             try:
@@ -229,11 +243,13 @@ class BlueCurrentClient:
                 raise _GiveUp(exc)  # bad credentials are permanent — never retry
             except _GiveUp:
                 raise  # gave up (from _note_login_attempt)
-            except (OSError, ConnectionClosed, ConnectionLost):
+            except (OSError, ConnectionClosed, ConnectionLost) as exc:
+                logger.debug("Reconnect attempt failed: %r", exc)
                 await self._teardown_transport()  # transport failure: keep the token and retry
                 self._grow_backoff()
             except (RequestTimeout, BlueCurrentException) as exc:
                 # auth/hello rejected: the token may be stale, so log in again next attempt
+                logger.debug("Reconnect attempt failed: %r", exc)
                 self.token = None
                 await self._teardown_transport()
                 if isinstance(exc, RequestTimeout):
@@ -257,6 +273,7 @@ class BlueCurrentClient:
         try:
             await wait_for(self._connected.wait(), timeout=self.reconnect_wait_timeout)
         except AsyncTimeoutError as exc:
+            logger.warning("Timed out waiting for reconnection")
             raise ConnectionLost("Timed out waiting for reconnection.") from exc
         # The supervisor may have set _connected to wake us *and* set _closed (give-up); re-check.
         if self._closed is not None:
@@ -832,20 +849,20 @@ class BlueCurrentClient:
         )
         message = await self._receive("STATUS_PASSWORD")
         if not message.get("accepted"):
-            self.logger.error("Authentication failed")
+            logger.error("Authentication failed")
             raise AuthenticationFailed(message)
         self.token = message["token"]
-        self.logger.info("Successfully authenticated")
+        logger.info("Successfully authenticated")
 
     async def _login_with_token(self) -> None:
         await self._send(dict(command="VALIDATE_API_TOKEN", token=self.api_token))
         message = await self._receive("STATUS_API_TOKEN")
         if not message.get("success"):
-            self.logger.error("Authentication failed")
+            logger.error("Authentication failed")
             raise AuthenticationFailed(message)
         self.token = message["token"]
         self.customer_id = message.get("customer_id")
-        self.logger.info("Successfully authenticated")
+        logger.info("Successfully authenticated")
 
     async def _hello(self) -> None:
         await self._send(dict(command="HELLO"), token=True)
@@ -869,14 +886,14 @@ class BlueCurrentClient:
         terminal: BlueCurrentException = ConnectionLost("The websocket connection was closed.")
         try:
             async for message in self.socket:
-                self.logger.debug(f"Received message: {message}")
                 try:
                     decoded = loads(message)
                 except JSONDecodeError:
                     # A single malformed frame is a transient wire artifact, not a reason to tear
                     # down a working connection; log it and keep the handler alive.
-                    self.logger.warning("Discarding malformed (non-JSON) frame: %r", message)
+                    logger.warning("Discarding malformed (non-JSON) frame: %r", message)
                     continue
+                logger.debug("Received message: %s", _redact(decoded))
                 await self.queue.put(decoded)
         except Exception as exc:
             terminal = ConnectionLost("The websocket connection failed.")

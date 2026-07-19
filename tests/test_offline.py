@@ -1,3 +1,4 @@
+import logging
 from asyncio import CancelledError, create_task, gather, sleep
 from contextlib import suppress
 from datetime import date, datetime, time
@@ -16,6 +17,8 @@ from fake_socket import (
 from pytest import MonkeyPatch, raises
 
 from pybluecurrent import BlueCurrentClient, Weekday
+from pybluecurrent.client import _redact
+from pybluecurrent.client import logger as client_logger
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException, ConnectionLost, RequestTimeout
 
 
@@ -756,3 +759,54 @@ class TestReconnect:
             await client.__aenter__()
         assert client._supervisor is None
         assert client.consumer is None and client.socket is None
+
+
+class TestLogging:
+    """Logger naming, credential redaction, and coverage of the reconnect failure paths."""
+
+    def test_logger_is_module_named(self):
+        assert client_logger.name == "pybluecurrent.client"
+
+    def test_redact_masks_sensitive_keys(self):
+        assert _redact({"object": "STATUS_PASSWORD", "accepted": True, "token": "secret"}) == {
+            "object": "STATUS_PASSWORD",
+            "accepted": True,
+            "token": "***",
+        }
+        assert _redact({"Authorization": "Token secret", "x": 1}) == {"Authorization": "***", "x": 1}
+
+    def test_redact_passes_through_when_nothing_sensitive(self):
+        plain = {"object": "GRID_STATUS", "data": {"id": "G1"}}
+        assert _redact(plain) is plain  # no copy when there's nothing to mask
+        assert _redact("raw non-dict frame") == "raw non-dict frame"
+
+    async def test_received_frame_logs_without_token(
+        self, monkeypatch: MonkeyPatch, fake_socket: FakeSocket, fake_rest: FakeRest, caplog
+    ):
+        # The login handshake pushes a STATUS_PASSWORD frame (which carries the token) through _handler.
+        monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
+        monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
+        client = BlueCurrentClient("username", "password")
+        client.auto_reconnect = False
+        with caplog.at_level(logging.DEBUG, logger="pybluecurrent.client"):
+            async with client:
+                pass
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "STATUS_PASSWORD" in logged  # the frame was logged...
+        assert FAKE_TOKEN not in logged  # ...but the token was masked
+        assert "'token': '***'" in logged
+
+    async def test_reconnect_abandoned_is_logged(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest, caplog):
+        first = FakeSocket()
+        reconnects = [FakeSocket() for _ in range(4)]
+        for socket in reconnects:
+            socket.on("HELLO", {"object": "ERROR", "error": 1, "message": "Invalid Auth Token"})
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), *(FakeConnection(s) for s in reconnects))
+        )
+        client.reconnect_max_relogins = 2
+        with caplog.at_level(logging.ERROR, logger="pybluecurrent.client"):
+            async with client:
+                first.close()
+                await _wait_until(lambda: client._closed is not None)
+        assert any("Reconnect abandoned" in record.getMessage() for record in caplog.records)
