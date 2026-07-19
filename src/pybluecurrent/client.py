@@ -621,7 +621,7 @@ class BlueCurrentClient:
                 evse_id=evse_id,
                 start_time=format_time(start_time),
                 end_time=format_time(end_time),
-                # Days must be a whitespace-free JSON string, exactly as the web app's JSON.stringify emits.
+                # Days must be a compact JSON string (no whitespace), which is what the backend expects.
                 days=dumps(selected_days, separators=(",", ":")),
             ),
         )
@@ -977,7 +977,7 @@ class BlueCurrentClient:
         response = await self.httpx_client.post(
             f"{self.api_url}/{path}",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
-            json=body,  # send as JSON (sets Content-Type), like the web app
+            json=body,  # send as JSON (sets Content-Type)
         )
         if not response.is_success:
             if response.headers.get("content-type", "").startswith("application/json"):
