@@ -89,6 +89,7 @@ class Tariff(_TariffBase, total=False):
     """The tariff applied at a charge point."""
 
     vat_percentage: int
+    permission: str
 
 
 class Location(TypedDict):
@@ -155,14 +156,17 @@ class ChargePoint(_ChargePointBase, total=False):
 
     A disabled smart-charging profile is still present, slimmed to its ``{value, permission}``
     wrapper; its schedule/settings fields appear only while the profile is enabled.
-    ``plug_and_charge_card`` is absent when no plug-and-charge card is configured.
+    ``plug_and_charge_card`` is absent when no plug-and-charge card is configured;
+    ``plug_and_charge_charge_card`` is the card currently used for plug-and-charge (``None`` when none).
     """
 
     plug_and_charge_card: CardRef
+    plug_and_charge_charge_card: CardRef | None
 
 
 class _ChargePointSettingsBase(TypedDict):
     evse_id: str
+    chargepoint_name: str
     plug_and_charge: BoolSetting
     public_charging: BoolSetting
     default_card: CardRef
@@ -175,6 +179,9 @@ class _ChargePointSettingsBase(TypedDict):
     plug_and_charge_notification: BoolSetting
     led_intensity: IntSetting
     led_interaction: BoolSetting
+    tariff: Tariff
+    location: Location
+    publish_location: BoolSetting
     delayed_charging: DelayedCharging
     price_based_charging: PriceBasedCharging
 
@@ -184,10 +191,12 @@ class ChargePointSettings(_ChargePointSettingsBase, total=False):
 
     A disabled smart-charging profile is still present, slimmed to its ``{value, permission}``
     wrapper; its schedule/settings fields appear only while the profile is enabled.
-    ``plug_and_charge_card`` is absent when no plug-and-charge card is configured.
+    ``plug_and_charge_card`` is absent when no plug-and-charge card is configured;
+    ``plug_and_charge_charge_card`` is the card currently used for plug-and-charge (``None`` when none).
     """
 
     plug_and_charge_card: CardRef
+    plug_and_charge_charge_card: CardRef | None
 
 
 class GridStatus(TypedDict):
@@ -249,9 +258,7 @@ class Grid(TypedDict):
     id: str
 
 
-class Transaction(TypedDict):
-    """A single charging transaction."""
-
+class _TransactionBase(TypedDict):
     transaction_id: int
     chargepoint_id: str
     chargepoint_type: str
@@ -263,8 +270,19 @@ class Transaction(TypedDict):
     card_name: str
     total_costs: float
     total_costs_ex_vat: float
+    reimbursement_tariff_ex_vat: float
     vat: int
     currency: str
+
+
+class Transaction(_TransactionBase, total=False):
+    """A single charging transaction.
+
+    ``reason_no_settlement`` is present (a reason string) only when the transaction was not
+    settled; it is absent or ``None`` for a normally settled transaction.
+    """
+
+    reason_no_settlement: str | None
 
 
 class TransactionsPage(TypedDict):
@@ -274,4 +292,5 @@ class TransactionsPage(TypedDict):
     next_page: int | None
     max_per_page: int
     total_pages: int
+    total_transactions: int
     transactions: list[Transaction]
