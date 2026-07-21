@@ -129,9 +129,10 @@ class Account(TypedDict):
     hubspot_user_identity: str
 
 
-class _ChargePointBase(TypedDict):
+class _ChargePointCommon(TypedDict):
+    """Fields common to ``ChargePoint`` and ``ChargePointSettings``."""
+
     evse_id: str
-    name: str
     model_type: str
     chargepoint_type: str
     is_cable: bool
@@ -145,69 +146,53 @@ class _ChargePointBase(TypedDict):
     publish_location: BoolSetting
     smart_charging: bool
     smart_charging_dynamic: bool
-    activity: str
     location: Location
     delayed_charging: DelayedCharging
     price_based_charging: PriceBasedCharging
 
 
-class ChargePoint(_ChargePointBase, total=False):
+class _ChargePointCards(TypedDict, total=False):
+    """The optional plug-and-charge card fields, shared by a charge point and its settings.
+
+    ``plug_and_charge_card`` is absent when no plug-and-charge card is configured;
+    ``plug_and_charge_charge_card`` is the card currently used for plug-and-charge (``None`` when none).
+    """
+
+    plug_and_charge_card: CardRef
+    plug_and_charge_charge_card: CardRef | None
+
+
+class ChargePoint(_ChargePointCommon, _ChargePointCards):
     """A charge point, as returned by ``get_charge_points``.
 
     A disabled smart-charging profile is still present, slimmed to its ``{value, permission}``
     wrapper; its schedule/settings fields appear only while the profile is enabled.
-    ``plug_and_charge_card`` is absent when no plug-and-charge card is configured;
-    ``plug_and_charge_charge_card`` is the card currently used for plug-and-charge (``None`` when none).
     """
 
-    plug_and_charge_card: CardRef
-    plug_and_charge_charge_card: CardRef | None
+    name: str
+    activity: str
 
 
-class _ChargePointSettingsBase(TypedDict):
-    evse_id: str
-    chargepoint_name: str
-    plug_and_charge: BoolSetting
-    public_charging: BoolSetting
-    default_card: CardRef
-    preferred_card: CardRef
-    smart_charging: bool
-    smart_charging_dynamic: bool
-    model_type: str
-    is_cable: bool
-    chargepoint_type: str
-    plug_and_charge_notification: BoolSetting
-    led_intensity: IntSetting
-    led_interaction: BoolSetting
-    tariff: Tariff
-    location: Location
-    publish_location: BoolSetting
-    delayed_charging: DelayedCharging
-    price_based_charging: PriceBasedCharging
-
-
-class ChargePointSettings(_ChargePointSettingsBase, total=False):
+class ChargePointSettings(_ChargePointCommon, _ChargePointCards):
     """The settings of a charge point, as returned by ``get_charge_point_settings``.
 
     A disabled smart-charging profile is still present, slimmed to its ``{value, permission}``
     wrapper; its schedule/settings fields appear only while the profile is enabled.
-    ``plug_and_charge_card`` is absent when no plug-and-charge card is configured;
-    ``plug_and_charge_charge_card`` is the card currently used for plug-and-charge (``None`` when none).
     """
 
-    plug_and_charge_card: CardRef
-    plug_and_charge_charge_card: CardRef | None
+    chargepoint_name: str
+    led_intensity: IntSetting
 
 
 class GridStatus(TypedDict):
     """The grid status of a charge point, as returned by ``get_grid_status`` (currents in amps)."""
 
     id: str
-    grid_actual_p1: float
-    grid_actual_p2: float
-    grid_actual_p3: float
-    grid_max_install: float
-    grid_max_reserved: float
+    grid_actual_p1: float  # actual current on grid phase L1
+    grid_actual_p2: float  # actual current on grid phase L2
+    grid_actual_p3: float  # actual current on grid phase L3
+    grid_max_install: float  # the grid connection's installed maximum current (per phase)
+    grid_max_reserved: float  # maximum grid current the charge point(s) may use together
 
 
 class SustainabilityStatus(TypedDict):
@@ -229,9 +214,9 @@ class ChargePointStatus(TypedDict):
     actual_v3: float
     actual_kwh: float
     boosting: bool
-    max_usage: float
-    smartcharging_max_usage: float
-    max_offline: float
+    max_usage: float  # maximum current the charge point can deliver, in amps
+    smartcharging_max_usage: float  # maximum current, in amps, while smart charging is actively limiting
+    max_offline: float  # maximum charging current, in amps, while the charge point is offline
     offline_since: str
     start_datetime: datetime | None
     stop_datetime: datetime | None
@@ -278,8 +263,9 @@ class _TransactionBase(TypedDict):
 class Transaction(_TransactionBase, total=False):
     """A single charging transaction.
 
-    ``reason_no_settlement`` is present (a reason string) only when the transaction was not
-    settled; it is absent or ``None`` for a normally settled transaction.
+    ``reason_no_settlement`` holds the reason a transaction was not settled, as a string. A
+    normally settled transaction has no reason: the key is either absent or present as ``None`` —
+    so treat both a missing key and ``None`` as "settled".
     """
 
     reason_no_settlement: str | None

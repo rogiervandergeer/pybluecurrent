@@ -44,6 +44,11 @@
       "uid": "A1B2C3D4E5F6",
       "valid": 1
     },
+    "plug_and_charge_charge_card": {
+      "customer_name": "Your Name",
+      "id": "BCU_HOME_USE",
+      "uid": "BCU_HOME_USE"
+    },
     "plug_and_charge_notification": {
       "permission": "write",
       "value": false

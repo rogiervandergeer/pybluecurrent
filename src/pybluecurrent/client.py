@@ -47,11 +47,17 @@ from pybluecurrent.utilities import (
 logger = getLogger(__name__)
 
 
-def _normalize_profile_keys(data: dict[str, Any]) -> None:
-    """Rewrite the smart-charging profile read keys to the canonical setter names, in place.
+# The plug-and-charge card reads back with this sentinel uid when no card is configured ("home use").
+_NO_CARD_UID = "BCU_HOME_USE"
 
-    The backend reads back a schedule under different keys than the setters write; normalize
-    them so the read and write vocabularies match (``days``, ``expected_departure_time``).
+
+def _normalize_charge_point(data: dict[str, Any]) -> None:
+    """Normalize a charge-point or settings response in place.
+
+    - Rewrite the smart-charging profile read keys to the canonical setter names (``days``,
+      ``expected_departure_time``), since the backend reads them back under different keys.
+    - Surface the plug-and-charge card as ``None`` when none is configured, rather than the
+      backend's no-card sentinel card object.
     """
     delayed = data.get("delayed_charging")
     if isinstance(delayed, dict):
@@ -59,6 +65,9 @@ def _normalize_profile_keys(data: dict[str, Any]) -> None:
     price_based = data.get("price_based_charging")
     if isinstance(price_based, dict):
         rename_key(price_based, "expected_leave_time", "expected_departure_time")
+    card = data.get("plug_and_charge_charge_card")
+    if isinstance(card, dict) and card.get("uid") == _NO_CARD_UID:
+        data["plug_and_charge_charge_card"] = None
 
 
 # Identity sentinel broadcast on the queue when the receive handler exits, so in-flight _receive
@@ -432,7 +441,7 @@ class BlueCurrentClient:
         """
         data = (await self._request(dict(command="GET_CHARGE_POINTS"), "CHARGE_POINTS"))["data"]
         for charge_point in data:
-            _normalize_profile_keys(charge_point)
+            _normalize_charge_point(charge_point)
         return data
 
     async def get_charge_point_settings(self, evse_id: str) -> ChargePointSettings:
@@ -471,7 +480,7 @@ class BlueCurrentClient:
             }
         """
         data = (await self._request(dict(command="GET_CH_SETTINGS", evse_id=evse_id), "CH_SETTINGS"))["data"]
-        _normalize_profile_keys(data)
+        _normalize_charge_point(data)
         return data
 
     async def get_grid_status(self, evse_id: str) -> GridStatus:

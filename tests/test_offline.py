@@ -168,6 +168,8 @@ class TestOfflineCommands:
         settings = await offline_client.get_charge_point_settings("BCU123456")
         assert_model(settings, ChargePointSettings)
         assert settings["evse_id"] == "BCU123456"
+        # The no-card sentinel (uid "BCU_HOME_USE") is normalized to None.
+        assert settings["plug_and_charge_charge_card"] is None
 
     async def test_get_charge_cards(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_CHARGE_CARDS", load_fixture("charge_cards"))
