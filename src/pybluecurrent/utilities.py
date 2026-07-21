@@ -7,6 +7,11 @@ def format_time(value: time | str) -> str:
     return (datetime.strptime(value, "%H:%M").time() if isinstance(value, str) else value).strftime("%H:%M")
 
 
+def parse_time(value: str) -> time:
+    """Parse a "HH:MM" time-of-day string into a time."""
+    return datetime.strptime(value, "%H:%M").time()
+
+
 def parse_datetime_keys(
     source: dict[str, Any], formats: dict[str, tuple[str | tuple[str, ...], bool]]
 ) -> dict[str, Any]:
@@ -47,6 +52,12 @@ def _parse_datetime(value: str, datetime_format: str | tuple[str, ...]) -> datet
         except ValueError:
             continue
     raise ValueError(f"time data {value!r} does not match any of {candidates!r}")
+
+
+def rename_key(source: dict[str, Any], old: str, new: str) -> None:
+    """Rename a key in place if present, leaving the dict untouched when old is absent."""
+    if old in source:
+        source[new] = source.pop(old)
 
 
 def parse_list_datetime_keys(

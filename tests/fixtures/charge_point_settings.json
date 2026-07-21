@@ -1,5 +1,6 @@
 {
   "data": {
+    "chargepoint_name": "",
     "chargepoint_type": "HIDDEN",
     "default_card": {
       "customer_name": "Your Name",
@@ -7,6 +8,19 @@
       "name": "Your Card",
       "uid": "A1B2C3D4E5F6",
       "valid": 1
+    },
+    "delayed_charging": {
+      "end_time": "07:00",
+      "permission": "write",
+      "selected_days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "start_time": "23:00",
+      "value": true
     },
     "evse_id": "BCU123456",
     "is_cable": true,
@@ -18,19 +32,29 @@
       "permission": "none",
       "value": false
     },
+    "location": {
+      "city": "Utrecht",
+      "country": "NL",
+      "housenumber": "100",
+      "street": "Europalaan",
+      "x_coord": 50.1234,
+      "y_coord": 5.01234,
+      "zipcode": "3526KS"
+    },
     "model_type": "H:MOVE-C32T2",
     "plug_and_charge": {
       "permission": "write",
       "value": true
     },
-    "plug_and_charge_card": {
+    "plug_and_charge_charge_card": {
       "customer_name": "Your Name",
-      "id": "NL-ABC-123456-0",
-      "name": "Your Card",
-      "uid": "A1B2C3D4E5F6",
-      "valid": 1
+      "id": "BCU_HOME_USE",
+      "uid": "BCU_HOME_USE"
     },
-    "plug_and_charge_notification": false,
+    "plug_and_charge_notification": {
+      "permission": "write",
+      "value": false
+    },
     "preferred_card": {
       "customer_name": "Your Name",
       "id": "NL-ABC-123456-0",
@@ -38,12 +62,30 @@
       "uid": "A1B2C3D4E5F6",
       "valid": 1
     },
+    "price_based_charging": {
+      "permission": "write",
+      "value": false
+    },
     "public_charging": {
       "permission": "write",
       "value": false
     },
+    "publish_location": {
+      "permission": "write",
+      "value": false
+    },
     "smart_charging": true,
-    "smart_charging_dynamic": true
+    "smart_charging_dynamic": true,
+    "tariff": {
+      "currency": "EUR",
+      "permission": "write",
+      "price_ex_vat": 0.2,
+      "price_in_vat": 0.242,
+      "start_price_ex_vat": 0,
+      "start_price_in_vat": 0,
+      "tariff_id": "NLBCUT58",
+      "vat_percentage": 21
+    }
   },
   "evse_id": "BCU123456",
   "object": "CH_SETTINGS"

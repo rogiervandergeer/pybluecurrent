@@ -35,20 +35,27 @@
         "permission": "write",
         "value": true
       },
-      "plug_and_charge_card": {
+      "plug_and_charge_charge_card": {
         "customer_name": "Your Name",
         "id": "NL-ABC-123456-0",
         "name": "Your Card",
         "uid": "A1B2C3D4E5F6",
         "valid": 1
       },
-      "plug_and_charge_notification": false,
+      "plug_and_charge_notification": {
+        "permission": "write",
+        "value": false
+      },
       "preferred_card": {
         "customer_name": "Your Name",
         "id": "NL-ABC-123456-0",
         "name": "Your Card",
         "uid": "A1B2C3D4E5F6",
         "valid": 1
+      },
+      "price_based_charging": {
+        "permission": "none",
+        "value": false
       },
       "public_charging": {
         "permission": "write",

@@ -9,6 +9,7 @@ This project is pre-1.0: breaking changes may land in minor releases.
 
 ### Added
 
+- Typed response models in `pybluecurrent.models`. Each getter now declares a `TypedDict` return type (`Account`, `ChargePoint`, `ChargePointSettings`, `Transaction`, …) instead of a loose `dict`. Responses stay plain dictionaries, so existing `response["key"]` access is unchanged; you now get autocomplete and type checking, and `get_transactions` is fully typed rather than `dict[str, Any]`.
 - Automatic reconnection. A long-lived client now keeps itself connected: when the websocket drops it reconnects in the background with exponential backoff, reusing the cached session token. Calls made while reconnecting block until the connection is restored (bounded by `reconnect_wait_timeout`) rather than failing; calls already in flight when the drop happens still raise `ConnectionLost`. Tunable via the `auto_reconnect` (default on) and `reconnect_*` class attributes. Reconnection gives up after too many attempts, or immediately on rejected credentials, rather than retrying forever.
 - Delayed (time-window) smart charging: `set_delayed_charging()` to switch the profile on or off, and `set_delayed_charging_schedule()` to set the window and the days it applies to.
 - Price-based (dynamic-tariff) smart charging: `set_price_based_charging()` to switch the profile on or off, and `set_price_based_charging_settings()` to set the expected departure time and energy.
@@ -18,6 +19,8 @@ This project is pre-1.0: breaking changes may land in minor releases.
 
 ### Changed
 
+- `get_charge_points` and `get_charge_point_settings` now report the delayed- and price-based-charging schedules under the same names used to set them: `days` (previously `selected_days`) and `expected_departure_time` (previously `expected_leave_time`). This is a breaking change for code that read the old keys.
+- The delayed- and price-based-charging schedule times (`start_time`, `end_time`, `expected_departure_time`) are now returned as `datetime.time` objects instead of `"HH:MM"` strings.
 - Websocket connection failures are now surfaced instead of hanging. When the handler stops (the connection drops, or an unexpected error), pending and subsequent calls raise `ConnectionLost` immediately rather than blocking until they time out. A single malformed (non-JSON) frame is now logged and skipped instead of silently killing the connection.
 - `_receive` now enforces a single per-call deadline (a stream of unrelated frames can no longer postpone it indefinitely) and raises `RequestTimeout` rather than a bare `TimeoutError`.
 - `set_status()`, `unlock_connector()` and `soft_reset()` now raise `BlueCurrentException` when the command fails (a `STATUS_` frame with `success: false`), instead of `set_status()` returning silently or the others handing back the failed frame. Their wait for that verdict is also longer (a new `command_timeout`, default 60s), so the backend's own ~30s answer is no longer cut off just before it arrives.
