@@ -215,7 +215,7 @@ class ChargePointStatus(TypedDict):
     actual_kwh: float
     boosting: bool
     max_usage: float  # maximum current the charge point can deliver, in amps
-    smartcharging_max_usage: float  # maximum current, in amps, while smart charging is actively limiting
+    smartcharging_max_usage: float  # the smart-charging current limit in effect right now, in amps (updates live)
     max_offline: float  # maximum charging current, in amps, while the charge point is offline
     offline_since: str
     start_datetime: datetime | None
