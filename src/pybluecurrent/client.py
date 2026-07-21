@@ -41,6 +41,7 @@ from pybluecurrent.utilities import (
     format_time,
     parse_datetime_keys,
     parse_list_datetime_keys,
+    parse_time,
     rename_key,
 )
 
@@ -62,9 +63,14 @@ def _normalize_charge_point(data: dict[str, Any]) -> None:
     delayed = data.get("delayed_charging")
     if isinstance(delayed, dict):
         rename_key(delayed, "selected_days", "days")
+        for key in ("start_time", "end_time"):
+            if isinstance(delayed.get(key), str):
+                delayed[key] = parse_time(delayed[key])
     price_based = data.get("price_based_charging")
     if isinstance(price_based, dict):
         rename_key(price_based, "expected_leave_time", "expected_departure_time")
+        if isinstance(price_based.get("expected_departure_time"), str):
+            price_based["expected_departure_time"] = parse_time(price_based["expected_departure_time"])
     card = data.get("plug_and_charge_charge_card")
     if isinstance(card, dict) and card.get("uid") == _NO_CARD_UID:
         data["plug_and_charge_charge_card"] = None
@@ -421,8 +427,8 @@ class BlueCurrentClient:
                                  "customer_name": "Your Name", "valid": 1},
                 "preferred_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0", "name": "Your Card",
                                    "customer_name": "Your Name", "valid": 1},
-                "plug_and_charge_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0", "name": "Your Card",
-                                         "customer_name": "Your Name", "valid": 1},
+                "plug_and_charge_charge_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0",
+                                                "name": "Your Card", "customer_name": "Your Name", "valid": 1},
                 "tariff":  {"tariff_id","NLBCUT58", "price_ex_vat": 0.2, "start_price_ex_vat": 0, "price_in_vat": 0.242,
                             "start_price_in_vat": 0, "currency": "EUR", "vat_percentage": 21},
                 "plug_and_charge_notification": {"value": False, "permission": "write"},
@@ -463,8 +469,8 @@ class BlueCurrentClient:
                                  "customer_name": "Your Name", "valid": 1},
                 "preferred_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0", "name": "Your Card",
                                    "customer_name": "Your Name", "valid": 1},
-                "plug_and_charge_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0", "name": "Your Card",
-                                         "customer_name": "Your Name", "valid": 1},
+                "plug_and_charge_charge_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0",
+                                                "name": "Your Card", "customer_name": "Your Name", "valid": 1},
                 "smart_charging": True,
                 "smart_charging_dynamic": True,
                 "model_type": "H:MOVE-C32T2",

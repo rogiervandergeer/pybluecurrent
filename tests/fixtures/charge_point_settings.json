@@ -10,8 +10,17 @@
       "valid": 1
     },
     "delayed_charging": {
+      "end_time": "07:00",
       "permission": "write",
-      "value": false
+      "selected_days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "start_time": "23:00",
+      "value": true
     },
     "evse_id": "BCU123456",
     "is_cable": true,
@@ -36,13 +45,6 @@
     "plug_and_charge": {
       "permission": "write",
       "value": true
-    },
-    "plug_and_charge_card": {
-      "customer_name": "Your Name",
-      "id": "NL-ABC-123456-0",
-      "name": "Your Card",
-      "uid": "A1B2C3D4E5F6",
-      "valid": 1
     },
     "plug_and_charge_charge_card": {
       "customer_name": "Your Name",

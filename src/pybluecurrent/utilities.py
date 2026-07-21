@@ -7,6 +7,11 @@ def format_time(value: time | str) -> str:
     return (datetime.strptime(value, "%H:%M").time() if isinstance(value, str) else value).strftime("%H:%M")
 
 
+def parse_time(value: str) -> time:
+    """Parse a "HH:MM" time-of-day string into a time."""
+    return datetime.strptime(value, "%H:%M").time()
+
+
 def parse_datetime_keys(
     source: dict[str, Any], formats: dict[str, tuple[str | tuple[str, ...], bool]]
 ) -> dict[str, Any]:

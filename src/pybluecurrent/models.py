@@ -9,7 +9,7 @@ Sub-shapes that recur across responses (the ``{value, permission}`` wrapper, car
 locations) are factored out and reused.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import TypedDict
 
 
@@ -32,11 +32,12 @@ class DelayedCharging(BoolSetting, total=False):
 
     ``days`` are isoweekday numbers (1 for Monday through 7 for Sunday). This is the same
     vocabulary as ``set_delayed_charging_schedule(days=...)``; the backend's own read key
-    (``selected_days``) is normalized to ``days`` before you see it.
+    (``selected_days``) is normalized to ``days`` before you see it. ``start_time``/``end_time``
+    are parsed from the backend's "HH:MM" strings into ``time`` objects.
     """
 
-    start_time: str
-    end_time: str
+    start_time: time
+    end_time: time
     days: list[int]
 
 
@@ -44,10 +45,11 @@ class PriceBasedCharging(BoolSetting, total=False):
     """The price-based charging profile: on/off plus, when enabled, its settings.
 
     ``expected_departure_time`` matches ``set_price_based_charging_settings(...)``; the backend's
-    own read key (``expected_leave_time``) is normalized to it before you see it.
+    own read key (``expected_leave_time``) is normalized to it before you see it, and parsed from
+    the backend's "HH:MM" string into a ``time`` object.
     """
 
-    expected_departure_time: str
+    expected_departure_time: time
     expected_kwh: float
     minimum_kwh: float
 
@@ -152,13 +154,11 @@ class _ChargePointCommon(TypedDict):
 
 
 class _ChargePointCards(TypedDict, total=False):
-    """The optional plug-and-charge card fields, shared by a charge point and its settings.
+    """The optional plug-and-charge card field, shared by a charge point and its settings.
 
-    ``plug_and_charge_card`` is absent when no plug-and-charge card is configured;
     ``plug_and_charge_charge_card`` is the card currently used for plug-and-charge (``None`` when none).
     """
 
-    plug_and_charge_card: CardRef
     plug_and_charge_charge_card: CardRef | None
 
 

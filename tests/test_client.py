@@ -105,29 +105,28 @@ class TestSocketApi:
 
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
     async def test_set_plug_and_charge_card(self, connected_client: BlueCurrentClient, evse_id: str):
-        async def _get_plug_and_charge_card_uid() -> str | None:
+        async def _active_card_uid() -> str | None:
+            # The active plug-and-charge card's uid, or None when no card is configured (the client
+            # normalizes that from the backend's "BCU_HOME_USE" sentinel).
             settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-            try:
-                return settings["plug_and_charge_charge_card"]["uid"]  # type: ignore
-            except KeyError:
-                return None
+            card = settings.get("plug_and_charge_charge_card")
+            return card["uid"] if card else None
 
-        # Get the original card, if any
-        before_card = await _get_plug_and_charge_card_uid()
+        # Get the original card, if any (None means no card is configured).
+        before_card = await _active_card_uid()
 
-        # Get all possible cards, including no card
+        # Get all possible cards, plus no card (None).
         charge_cards = await connected_client.get_charge_cards()
         if len(charge_cards) == 0:
             skip(reason="No charge cards.")
-        uids: list[str | None] = [charge_card["uid"] for charge_card in charge_cards] + ["BCU_HOME_USE"]  # type: ignore
-        # Set each card as plug_and_charge_card
+        uids: list[str | None] = [charge_card["uid"] for charge_card in charge_cards] + [None]
         for uid in uids:
             if uid != before_card:
                 await connected_client.set_plug_and_charge_charge_card(evse_id=evse_id, uid=uid)
-                assert await _get_plug_and_charge_card_uid() == uid
-        # Set the original card as plug_and_charge_card
+                assert await _active_card_uid() == uid
+        # Restore the original card.
         await connected_client.set_plug_and_charge_charge_card(evse_id=evse_id, uid=before_card)
-        assert await _get_plug_and_charge_card_uid() == before_card
+        assert await _active_card_uid() == before_card
 
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
     async def test_set_invalid_plug_and_charge_card(self, connected_client: BlueCurrentClient, evse_id: str):
@@ -200,8 +199,8 @@ class TestDelayedCharging:
             evse_id=evse_id, start_time=time(1, 23), end_time=time(4, 56), days=[Weekday.TUESDAY, "sa"]
         )
         after = await _get_delayed_charging()
-        assert after["start_time"] == "01:23"
-        assert after["end_time"] == "04:56"
+        assert after["start_time"] == time(1, 23)
+        assert after["end_time"] == time(4, 56)
         assert after["days"] == [2, 6]
 
         await connected_client.set_delayed_charging_schedule(
@@ -265,7 +264,7 @@ class TestPriceBasedCharging:
                 evse_id=evse_id, expected_departure_time=time(6, 30), expected_kwh=25.1, minimum_kwh=10
             )
             after = await _get_price_based_charging()
-            assert after["expected_departure_time"] == "06:30"
+            assert after["expected_departure_time"] == time(6, 30)
             assert after["expected_kwh"] == 25.1
             assert after["minimum_kwh"] == 10
 

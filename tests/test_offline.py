@@ -155,6 +155,7 @@ class TestOfflineCommands:
         charge_points = await offline_client.get_charge_points()
         assert_model(charge_points, list[ChargePoint])
         assert charge_points[0]["evse_id"] == "BCU123456"
+        assert charge_points[0]["plug_and_charge_charge_card"]["uid"] == "A1B2C3D4E5F6"
 
     async def test_get_grid_status(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_GRID_STATUS", load_fixture("grid_status"))
@@ -170,6 +171,10 @@ class TestOfflineCommands:
         assert settings["evse_id"] == "BCU123456"
         # The no-card sentinel (uid "BCU_HOME_USE") is normalized to None.
         assert settings["plug_and_charge_charge_card"] is None
+        # The delayed-charging schedule is normalized: selected_days -> days, "HH:MM" -> time.
+        assert settings["delayed_charging"]["days"] == [1, 2, 3, 4, 5]
+        assert settings["delayed_charging"]["start_time"] == time(23, 0)
+        assert settings["delayed_charging"]["end_time"] == time(7, 0)
 
     async def test_get_charge_cards(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_CHARGE_CARDS", load_fixture("charge_cards"))

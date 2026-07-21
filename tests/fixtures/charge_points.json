@@ -35,7 +35,7 @@
         "permission": "write",
         "value": true
       },
-      "plug_and_charge_card": {
+      "plug_and_charge_charge_card": {
         "customer_name": "Your Name",
         "id": "NL-ABC-123456-0",
         "name": "Your Card",
