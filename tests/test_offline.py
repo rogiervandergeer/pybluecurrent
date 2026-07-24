@@ -236,14 +236,14 @@ class TestOfflineTwoPhaseCommands:
             await task
         assert exc.value.args[0]["error"] == "TIMEOUT"
 
-    async def test_unlock_connector_success_returns_status(
+    async def test_unlock_connector_success_returns_none(
         self, offline_client: BlueCurrentClient, fake_socket: FakeSocket
     ):
         fake_socket.on("UNLOCK_CONNECTOR", {"object": "RECEIVED_UNLOCK_CONNECTOR"})
         task = create_task(offline_client.unlock_connector("BCU123456"))
         await self._reach_status_wait()
         fake_socket.feed({"object": "STATUS_UNLOCK_CONNECTOR", "success": True, "evse_id": "BCU123456"})
-        assert (await task)["success"] is True
+        assert await task is None
 
     async def test_unlock_connector_failure_raises(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("UNLOCK_CONNECTOR", {"object": "RECEIVED_UNLOCK_CONNECTOR"})
@@ -253,12 +253,12 @@ class TestOfflineTwoPhaseCommands:
         with raises(BlueCurrentException):
             await task
 
-    async def test_soft_reset_success_returns_status(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+    async def test_soft_reset_success_returns_none(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("SOFT_RESET", {"object": "RECEIVED_SOFT_RESET"})
         task = create_task(offline_client.soft_reset("BCU123456"))
         await self._reach_status_wait()
         fake_socket.feed({"object": "STATUS_SOFT_RESET", "success": True})
-        assert (await task)["success"] is True
+        assert await task is None
 
     async def test_soft_reset_failure_raises(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("SOFT_RESET", {"object": "RECEIVED_SOFT_RESET"})
