@@ -7,6 +7,18 @@ Python client for [BlueCurrent](https://www.bluecurrent.nl) charge points.
 ![PyPI - License](https://img.shields.io/pypi/l/pybluecurrent)
 ![PyPI - Downloads](https://img.shields.io/pypi/dm/pybluecurrent) 
 
+`pybluecurrent` is an **unofficial, third-party async client** — it is not affiliated with
+BlueCurrent.
+
+Compared to BlueCurrent's official [`bluecurrent-api`](https://github.com/bluecurrent/HomeAssistantAPI):
+
+- **Per-call `async`/`await`** — each method awaits its own response, rather than a single callback
+  receiver that routes every server message.
+- **Typed responses** — getters return `TypedDict`-annotated dictionaries; the official client
+  hands back untyped dicts.
+- **Instance-scoped state** — no process-global mutable state.
+- **Username/password *or* API token** — the official client is API-token only.
+
 ## Usage
 
 Using the client is as simple as:
@@ -20,292 +32,222 @@ async with client:
     transactions = await client.get_transactions(charge_points[0]["evse_id"])
 ```
 
-## Methods
-
-The `BlueCurrentClient` exposes the following methods:
-  
-- [`get_account`](#getaccount---get-your-account-information)
-- [`get_api_token`](#getapitoken---get-your-api-token)
-- [`generate_api_token`](#generateapitoken---generate-a-new-api-token)
-- [`get_charge_cards`](#getchargecards---get-your-charge-cards)
-- [`get_charge_points`](#getchargepoints---get-your-charge-points)
-- [`get_charge_point_settings`](#getchargepointsettings---get-the-settings-of-a-charge-point)
-- [`get_grid_status`](#getgridstatus---get-the-grid-status-associated-to-a-charge-point)
-- [`get_sustainability_status`](#getsustainabilitystatus---get-statistics-on-the-sustainability-of-all-your-charge-points)
-- [`set_plug_and_charge_charge_card`](#setplugandchargechargecard---set-the-charge-card-for-plug-and-charge)
-- [`set_status`](#setstatus---enable-or-disable-a-charge-point)
-- [`login`](#login---log-in)
-- [`get_charge_point_status`](#getchargepointstatus---get-the-status-of-a-charge-point)
-- [`set_delayed_charging`](#setdelayedcharging---enable-or-disable-delayed-charging)
-- [`set_delayed_charging_schedule`](#setdelayedchargingschedule---set-the-delayed-charging-schedule)
-- [`set_price_based_charging`](#setpricebasedcharging---enable-or-disable-price-based-charging)
-- [`set_price_based_charging_settings`](#setpricebasedchargingsettings---set-the-price-based-charging-settings)
-- [`boost`](#boost---charge-now-overriding-the-active-smart-charging-profile)
-- [`get_contracts`](#getcontracts---get-your-contracts)
-- [`get_grids`](#getgrids---get-your-grid-connections)
-- [`get_transactions`](#gettransactions---get-a-list-of-transactions)
-- [`iterate_transactions`](#iteratetransactions---iterate-through-your-transactions)
-
 ### Connection
 
-The client can only be used when the websocket client is connected. For example:
+The client can only be used while its websocket is connected. For example:
 ```python
 client = BlueCurrentClient("your_username", "your_secret_password")
 async with client:
     result = await client.get_account()
 ```
-Entering the async context will automatically login.
+Entering the async context automatically logs in.
 
 Instead of a username and password, you can authenticate with an API token:
 ```python
 client = BlueCurrentClient(api_token="your_api_token")
 ```
-Retrieve or rotate the token with [`get_api_token`](#getapitoken---get-your-api-token) and
-[`generate_api_token`](#generateapitoken---generate-a-new-api-token), or from the
-[BlueCurrent website](https://my.bluecurrent.nl).
+Retrieve or rotate the token with [`get_api_token`](#get_api_token) and
+[`generate_api_token`](#generate_api_token), or from the [BlueCurrent website](https://my.bluecurrent.nl).
 
-#### `get_account` - Get your account information.
+## Methods
+
+Every method is a coroutine on `BlueCurrentClient`; call them inside the async context (see
+[Connection](#connection)). Charge points are addressed by their `evse_id`.
+
+- **Account & authentication** — [`get_account`](#get_account), [`get_api_token`](#get_api_token), [`generate_api_token`](#generate_api_token), [`get_contracts`](#get_contracts)
+- **Charge points & cards** — [`get_charge_points`](#get_charge_points), [`get_charge_point_settings`](#get_charge_point_settings), [`get_charge_point_status`](#get_charge_point_status), [`get_charge_cards`](#get_charge_cards)
+- **Grid & sustainability** — [`get_grid_status`](#get_grid_status), [`get_grids`](#get_grids), [`get_sustainability_status`](#get_sustainability_status)
+- **Settings & control** — [`set_plug_and_charge_charge_card`](#set_plug_and_charge_charge_card), [`set_status`](#set_status), [`soft_reset`](#soft_reset)
+- **Smart charging** — [`set_delayed_charging`](#set_delayed_charging), [`set_delayed_charging_schedule`](#set_delayed_charging_schedule), [`set_price_based_charging`](#set_price_based_charging), [`set_price_based_charging_settings`](#set_price_based_charging_settings), [`boost`](#boost)
+- **Transactions** — [`get_transactions`](#get_transactions), [`iterate_transactions`](#iterate_transactions)
+
+### Response models
+
+The getters return plain dictionaries annotated with `TypedDict`s from
+[`pybluecurrent.models`](https://github.com/rogiervandergeer/pybluecurrent/blob/main/src/pybluecurrent/models.py).
+Access is unchanged — `response["key"]`, `.get()`, `**response` and `json.dumps` all keep working —
+and an unexpected field the backend adds simply rides along; the types just add autocomplete and
+static checking:
 
 ```python
-async def get_account(self) -> dict[str, bool | str]
+from pybluecurrent.models import ChargePoint, Transaction
 ```
 
-##### Returns
-A dictionary describing your account:
+**The model definitions are the field-level reference** — each field, its type, and any parsing
+notes live there. The response types are `Account`, `ChargeCard`, `ChargePoint`,
+`ChargePointSettings`, `ChargePointStatus`, `GridStatus`, `Grid`, `SustainabilityStatus`,
+`Contract`, `TransactionsPage` and `Transaction`, built from the nested shapes `Tariff`,
+`Location`, `Address`, `DelayedCharging`, `PriceBasedCharging`, `CardRef`, `BoolSetting` and
+`IntSetting`. Dates and times are parsed for you: `date`/`datetime` fields are Python objects, and
+schedule times (`start_time`, `end_time`, `expected_departure_time`) are `datetime.time`.
+
+### Account & authentication
+
+#### get_account
 
 ```python
-{
-    "full_name": "Your Full Name",
-    "email": "your@email.address",
-    "login": "your@email.address",
-    "should_reset_password": False,
-    "developer_mode_enabled": False,
-    "tel": "",
-    "marketing_target": "bluecurrent",
-    "first_login_app": datetime(2020, 1, 15, 13, 33, 52),
-    "hubspot_user_identity": "a_very_long_string"
-}
+async def get_account(self) -> Account
 ```
 
-#### `get_api_token` - Get your API token.
+Returns your account information as an [`Account`](#response-models).
+
+#### get_api_token
 
 ```python
 async def get_api_token(self) -> str
 ```
 
-Returns the API token (home automation key) for your account. This token can be used to authenticate
+Returns the API token (home automation key) for your account. It can be used to authenticate
 instead of a username and password, by constructing the client with `BlueCurrentClient(api_token=...)`.
 
-#### `generate_api_token` - Generate a new API token.
+#### generate_api_token
 
 ```python
 async def generate_api_token(self) -> str
 ```
 
-Generates a new API token and returns it. **Warning:** this rotates the token — any previously issued
-token is invalidated, which will break anything still using the old one (for example a Home Assistant integration).
+Generates a new API token and returns it. **Warning:** this rotates the token — any previously
+issued token is invalidated, which will break anything still using the old one.
 
-#### `get_charge_cards` - Get your charge cards.
-
-```python
-async def get_charge_cards(self) -> list[dict[str, date | int | str | None]]
-```
-
-##### Returns
-
-A list of dictionaries, each representing a charge card:
-```python
-{
-    "uid": "A1B2C3D4E5F6",
-    "id": "NL-ABC-123456-0",
-    "name": "My Charge Cards",
-    "customer_name": "Your Name",
-    "valid": 1,
-    "date_created": date(2023, 6, 27),
-    "date_modified": date(2023, 7, 11),
-    "date_became_invalid": None
-}
-```
-
-#### `get_charge_points` - Get your charge points.
+#### get_contracts
 
 ```python
-async def get_charge_points(self) -> list[dict[str, bool | dict | str]]
+async def get_contracts(self) -> list[Contract]
 ```
 
-##### Returns
+Returns your contracts, each a [`Contract`](#response-models).
 
-A list of dictionaries, each representing a charge card:
-```python
-{
-    "evse_id": "BCU123456",
-    "name": "",
-    "model_type": "H:MOVE-C32T2",
-    "chargepoint_type": "HIDDEN",
-    "is_cable": True,
-    "public_charging": {"value": False, "permission": "write"},
-                    "default_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0", "name": "Your Card",
-                     "customer_name": "Your Name", "valid": 1},
-    "preferred_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0", "name": "Your Card",
-                       "customer_name": "Your Name", "valid": 1},
-    "plug_and_charge_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0", "name": "Your Card",
-                             "customer_name": "Your Name", "valid": 1},
-    "tariff":  {"tariff_id","NLBCUT58", "price_ex_vat": 0.2, "start_price_ex_vat": 0, "price_in_vat": 0.242,
-                "start_price_in_vat": 0, "currency": "EUR", "vat_percentage": 21},
-    "plug_and_charge_notification": False,
-    "plug_and_charge": {"value": True, "permission": "write"},
-    "led_interaction": {"value": False, "permission": "read"},
-    "publish_location": {"value": False, "permission": "write"},
-    "smart_charging": True,
-    "smart_charging_dynamic": True,
-    "activity": "available",
-    "location": {"x_coord": 50.1234, "y_coord": 5.01234, "street": "Europalaan", "housenumber": "100",
-                 "zipcode": "3526KS", "city": "Utrecht", "country": "NL"},
-    "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00", "end_time": "07:00",
-                         "selected_days": [1, 2, 3, 4, 5]},
-    "price_based_charging": {"value": False, "permission": "write"}
-}
-```
+### Charge points & cards
 
-#### `get_charge_point_settings` - Get the settings of a charge point.
-
-All the information returned by this endpoint is already included 
-in the response of [`get_charge_points`](#getchargepoints---get-your-charge-points).
+#### get_charge_points
 
 ```python
-async def get_charge_point_settings(self, evse_id: str) -> dict[str, bool | dict[str, Any] | str]
+async def get_charge_points(self) -> list[ChargePoint]
 ```
 
-##### Arguments
+Returns your charge points, each a [`ChargePoint`](#response-models). A disabled smart-charging
+profile is still present as its `{value, permission}` wrapper; its schedule/settings fields appear
+only while the profile is enabled.
+
+#### get_charge_point_settings
+
+```python
+async def get_charge_point_settings(self, evse_id: str) -> ChargePointSettings
+```
+
+Returns the settings of a charge point as a [`ChargePointSettings`](#response-models). All of this
+is already included in the response of [`get_charge_points`](#get_charge_points).
+
+**Arguments**
 - `evse_id`: The ID of the charge point.
 
-##### Returns
-A dictionary describing the settings:
-```python
-{
-    "evse_id": "BCU123456",
-    "plug_and_charge": {"value": True, "permission": "write"},
-    "public_charging": {"value": False, "permission": "write"},
-    "default_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0", "name": "Your Card",
-                     "customer_name": "Your Name", "valid": 1},
-    "preferred_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0", "name": "Your Card",
-                       "customer_name": "Your Name", "valid": 1},
-    "plug_and_charge_card": {"uid": "A1B2C3D4E5F6", "id": "NL-ABC-123456-0", "name": "Your Card",
-                             "customer_name": "Your Name", "valid": 1},
-    "smart_charging": True,
-    "smart_charging_dynamic": True,
-    "model_type": "H:MOVE-C32T2",
-    "is_cable": True,
-    "chargepoint_type": "HIDDEN",
-    "plug_and_charge_notification": False,
-    "led_intensity": {"value": 0, "permission": "none"},
-    "led_interaction": {"value": False, "permission": "none"},
-    "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00", "end_time": "07:00",
-                         "selected_days": [1, 2, 3, 4, 5]},
-    "price_based_charging": {"value": True, "permission": "write", "expected_leave_time": "07:00",
-                             "expected_kwh": 25, "minimum_kwh": 10}
-}
-```
-
-#### `get_grid_status` - Get the grid status associated to a charge point.
+#### get_charge_point_status
 
 ```python
-async def get_grid_status(self, evse_id: str) -> dict[str, int | str]
+async def get_charge_point_status(self, evse_id: str) -> ChargePointStatus
 ```
 
-##### Arguments
+Returns the live status of a charge point as a [`ChargePointStatus`](#response-models).
+
+**Arguments**
 - `evse_id`: The ID of the charge point.
 
-##### Returns
-A dictionary describing the actual grid current and maximum current in amps:
-```python
-{
-    "id": "GRID-BCU123456",
-    "grid_actual_p1": 1,
-    "grid_actual_p2": 2,
-    "grid_actual_p3": 3,
-    "grid_max_install": 25,
-    "grid_max_reserved": 25
-}
-```
-
-#### `get_sustainability_status` - Get statistics on the sustainability of all your charge points.
+#### get_charge_cards
 
 ```python
-async def get_sustainability_status(self) -> dict[str, float | int]
+async def get_charge_cards(self) -> list[ChargeCard]
 ```
 
-##### Returns
-A dictionary with two keys: `{"trees": 1, "co2": 12.345}`
+Returns your charge cards, each a [`ChargeCard`](#response-models).
 
-#### `set_plug_and_charge_charge_card` - Set the charge card for plug-and-charge
+### Grid & sustainability
+
+#### get_grid_status
+
+```python
+async def get_grid_status(self, evse_id: str) -> GridStatus
+```
+
+Returns the grid status associated with a charge point (currents in amps) as a
+[`GridStatus`](#response-models).
+
+**Arguments**
+- `evse_id`: The ID of the charge point.
+
+#### get_grids
+
+```python
+async def get_grids(self) -> list[Grid]
+```
+
+Returns your grid connections, each a [`Grid`](#response-models).
+
+#### get_sustainability_status
+
+```python
+async def get_sustainability_status(self) -> SustainabilityStatus
+```
+
+Returns sustainability statistics for all your charge points as a
+[`SustainabilityStatus`](#response-models) — `{"trees": ..., "co2": ...}`.
+
+### Settings & control
+
+#### set_plug_and_charge_charge_card
 
 ```python
 async def set_plug_and_charge_charge_card(self, evse_id: str, uid: str | None = None) -> None
 ```
 
-Sets the plug-and-charge card for the charge point. The uid must be a `uid` of one of your charge cards (see [`get_charge_cards`](#getchargecards---get-your-charge-cards)) or `None` to use no charge card.
+Sets the plug-and-charge card for the charge point. `uid` must be the `uid` of one of your
+[charge cards](#get_charge_cards), or `None` to charge without a card. Raises `BlueCurrentException`
+if the command fails.
 
-#### `set_status` - Enable or disable a charge point.
+**Arguments**
+- `evse_id`: The ID of the charge point.
+- `uid`: A charge card UID, or `None` (the default) to use no charge card.
+
+#### set_status
 
 ```python
 async def set_status(self, evse_id: str, enabled: bool) -> None
 ```
 
-##### Arguments
+Enables or disables a charge point. Raises `BlueCurrentException` if the command fails.
+
+**Arguments**
 - `evse_id`: The ID of the charge point.
 - `enabled`: Boolean that indicates the desired status.
 
-#### `get_charge_point_status` - Get the status of a charge point.
+#### soft_reset
 
 ```python
-async def get_charge_point_status(self, evse_id: str) -> dict[str, datetime | float | int | str | None]
+async def soft_reset(self, evse_id: str) -> None
 ```
 
-##### Arguments
+Soft-resets a charge point. Raises `BlueCurrentException` if the command fails.
+
+**Arguments**
 - `evse_id`: The ID of the charge point.
 
-##### Returns
-A dictionary with the chargepoint status:
-```python
-{
-    "actual_p1": 0,
-    "actual_p2": 0,
-    "actual_p3": 0,
-    "activity": "available",
-    "actual_v1": 0,
-    "actual_v2": 0,
-    "actual_v3": 0,
-    "actual_kwh": 0,
-    "boosting": False,
-    "max_usage": 20,
-    "smartcharging_max_usage": 6,
-    "max_offline": 10,
-    "offline_since": "",
-    "start_datetime": datetime(2023, 7, 24, 15, 25, 33),
-    "stop_datetime": datetime(2023, 7, 26, 7, 48, 40),
-    "total_cost": 9.93,
-    "vehicle_status": "A",
-    "evse_id": "BCU123456",
-}
-```
+### Smart charging
 
-#### `set_delayed_charging` - Enable or disable delayed charging.
+#### set_delayed_charging
 
 ```python
 async def set_delayed_charging(self, evse_id: str, enabled: bool) -> None
 ```
 
-While delayed charging is enabled, the charge point only charges within the window configured with
-[`set_delayed_charging_schedule`](#setdelayedchargingschedule---set-the-delayed-charging-schedule), and delays charging
-outside of it. A charge point has at most one smart charging profile active, so enabling delayed charging disables any
-other profile.
+Enables or disables delayed charging. While enabled, the charge point only charges within the window
+configured with [`set_delayed_charging_schedule`](#set_delayed_charging_schedule), and delays
+charging outside of it. A charge point has at most one smart-charging profile active, so enabling
+this disables any other profile.
 
-##### Arguments
+**Arguments**
 - `evse_id`: The ID of the charge point.
-- `enabled`: Boolean that indicates whether delayed charging should be enabled.
+- `enabled`: Whether delayed charging should be enabled.
 
-#### `set_delayed_charging_schedule` - Set the delayed charging schedule.
+#### set_delayed_charging_schedule
 
 ```python
 async def set_delayed_charging_schedule(
@@ -317,9 +259,9 @@ async def set_delayed_charging_schedule(
 ) -> None
 ```
 
-Sets the window in which the charge point may charge on the selected days. The window may span midnight. It is only
-applied while delayed charging is enabled with
-[`set_delayed_charging`](#setdelayedcharging---enable-or-disable-delayed-charging).
+Sets the window in which the charge point may charge on the selected days. The window may span
+midnight. It is applied only while delayed charging is enabled with
+[`set_delayed_charging`](#set_delayed_charging).
 
 ```python
 from datetime import time
@@ -330,32 +272,32 @@ await client.set_delayed_charging_schedule(
 )
 ```
 
-##### Arguments
+**Arguments**
 - `evse_id`: The ID of the charge point.
 - `start_time`: The time at which charging may start, as a `time` or a `"HH:MM"` string.
 - `end_time`: The time at which charging must stop, as a `time` or a `"HH:MM"` string.
-- `days`: The days on which the schedule applies. Each day may be a `pybluecurrent.Weekday`, an isoweekday number
-  (1 for Monday through 7 for Sunday), or a weekday name such as `"monday"` or `"mo"`.
+- `days`: The days on which the schedule applies. Each day may be a `pybluecurrent.Weekday`, an
+  isoweekday number (1 for Monday through 7 for Sunday), or a name such as `"monday"` or `"mo"`.
 
 The schedule is read back from the `delayed_charging` key of
-[`get_charge_point_settings`](#getchargepointsettings---get-the-settings-of-a-charge-point).
+[`get_charge_point_settings`](#get_charge_point_settings).
 
-#### `set_price_based_charging` - Enable or disable price-based charging.
+#### set_price_based_charging
 
 ```python
 async def set_price_based_charging(self, evse_id: str, enabled: bool) -> None
 ```
 
-While price-based charging is enabled, the charge point charges during the cheapest hours before the expected departure
-time, as configured with
-[`set_price_based_charging_settings`](#setpricebasedchargingsettings---set-the-price-based-charging-settings). A charge
-point has at most one smart charging profile active, so enabling price-based charging disables any other profile.
+Enables or disables price-based charging. While enabled, the charge point charges during the
+cheapest hours before the expected departure time, as configured with
+[`set_price_based_charging_settings`](#set_price_based_charging_settings). A charge point has at most
+one smart-charging profile active, so enabling this disables any other profile.
 
-##### Arguments
+**Arguments**
 - `evse_id`: The ID of the charge point.
-- `enabled`: Boolean that indicates whether price-based charging should be enabled.
+- `enabled`: Whether price-based charging should be enabled.
 
-#### `set_price_based_charging_settings` - Set the price-based charging settings.
+#### set_price_based_charging_settings
 
 ```python
 async def set_price_based_charging_settings(
@@ -367,140 +309,69 @@ async def set_price_based_charging_settings(
 ) -> None
 ```
 
-Configures how much energy to charge before departure. Only applied while price-based charging is enabled with
-[`set_price_based_charging`](#setpricebasedcharging---enable-or-disable-price-based-charging).
+Configures how much energy to charge before departure. Applied only while price-based charging is
+enabled with [`set_price_based_charging`](#set_price_based_charging).
 
-##### Arguments
+**Arguments**
 - `evse_id`: The ID of the charge point.
-- `expected_departure_time`: The time the vehicle is expected to leave, as a `time` or a `"HH:MM"` string. Note this is
-  read back as `expected_leave_time` from the `price_based_charging` settings.
+- `expected_departure_time`: The time the vehicle is expected to leave, as a `time` or a `"HH:MM"`
+  string.
 - `expected_kwh`: The amount of energy, in kWh, expected to be charged before departure.
 - `minimum_kwh`: The amount of energy, in kWh, to charge immediately regardless of price.
 
 The settings are read back from the `price_based_charging` key of
-[`get_charge_point_settings`](#getchargepointsettings---get-the-settings-of-a-charge-point).
+[`get_charge_point_settings`](#get_charge_point_settings).
 
-#### `boost` - Charge now, overriding the active smart charging profile.
+#### boost
 
 ```python
 async def boost(self, evse_id: str) -> None
 ```
 
-Starts charging immediately, overriding whichever smart charging profile is currently delaying charging — delayed
-charging or price-based charging — for the ongoing session. The override cannot be undone. While it is active,
-[`get_charge_point_status`](#getchargepointstatus---get-the-status-of-a-charge-point) reports `"boosting": True`.
-Raises `ValueError` if no smart charging profile is active.
+Starts charging immediately, overriding whichever smart-charging profile is currently delaying
+charging — delayed charging or price-based charging — for the ongoing session. The override cannot
+be undone. While it is active, [`get_charge_point_status`](#get_charge_point_status) reports
+`"boosting": True`. Raises `ValueError` if no smart-charging profile is active.
 
-##### Arguments
+**Arguments**
 - `evse_id`: The ID of the charge point.
 
-#### `get_contracts` - Get your contracts.
+### Transactions
+
+#### get_transactions
 
 ```python
-async def get_contracts(self) -> list[dict[str, str]]
+async def get_transactions(self, evse_id: str, newest_first: bool = True, page: int = 1) -> TransactionsPage
 ```
 
-##### Returns
-A list of dictionaries, each representing a contract:
-```python
-[
-    {
-        "contract_id": "BCU12345678",
-        "contact_email": "your@email.address",
-        "subscription_type": "BASIS",
-        "beneficiary_name": "Your Name",
-        "iban_beneficiary": "NL00ABCD0123456789"
-    }
-]
-```
+Returns a single page of transactions as a [`TransactionsPage`](#response-models); its
+`transactions` key holds a list of [`Transaction`](#response-models).
 
-#### `get_grids` - Get your grid connections.
-
-```python
-async def get_grids(self) -> list[dict[str, bool | dict[str, str] | str]]
-```
-
-##### Returns
-A list of dictionaries, each representing a grid:
-```python
-[
-    {
-        "address": {"street": "Street Name", "housenumber": "1", "postal_code": "1234AB",
-                    "city": "Amsterdam", "country": "NL", "region": ""},
-        "smart_charging": True,
-        "id": "GRID-BCU123456"
-    }
-]
-```
-
-#### `get_transactions` - Get a list of transactions.
-
-```python
-async def get_transactions(
-        self, evse_id: str, newest_first: bool = True, page: int = 1
-    ) -> dict[str, int | list[dict[str, Any]]]
-```
-
-##### Arguments
+**Arguments**
 - `evse_id`: The ID of the charge point.
 - `newest_first`: If `True`, start with the most recent transaction. Defaults to `True`.
 - `page`: Page number to get. Defaults to `1`.
 
-##### Returns
-A dictionary like this:
-```python
-{
-    "current_page": 1,
-    "next_page": 2,  # This is None when there is no next page.
-    "max_per_page": 25,
-    "total_pages": 8,
-    "transactions: [
-        {
-            "transaction_id": 12345678,
-            "chargepoint_id": "BCU123456",
-            "chargepoint_type": "HIDDEN",
-            "evse_name": "Charge Point Name",
-            "started_at": datetime(2023, 7, 1, 12, 34, 56),
-            "end_time": datetime(2023, 7, 1, 14, 0, 0),
-            "kwh": 12.34,
-            "card_id": "NL-ABC-123456-0",
-            "card_name": "Card Name",
-            "total_costs": 5.97,
-            "total_costs_ex_vat": 4.93,
-            "vat": 21,
-            "currency": "EUR"
-        },
-        ...
-    ]
-}
-```
-
-#### `iterate_transactions` - Iterate through your transactions
+#### iterate_transactions
 
 ```python
-async def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> AsyncIterable[dict[str, Any]]
+async def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> AsyncIterable[Transaction]
 ```
 
-##### Arguments
+Iterates over all your transactions, fetching further pages as needed. Yields
+[`Transaction`](#response-models) dictionaries.
+
+**Arguments**
 - `evse_id`: The ID of the charge point.
 - `newest_first`: If `True`, start with the most recent transaction. Defaults to `True`.
 
-##### Returns
-An iterable of dictionaries describing the transactions. Each dictionary looks like this:
-```python
-{
-    "transaction_id": 12345678,
-    "chargepoint_id": "BCU123456",
-    "chargepoint_type": "HIDDEN",
-    "evse_name": "Charge Point Name",
-    "started_at": datetime(2023, 7, 1, 12, 34, 56),
-    "end_time": datetime(2023, 7, 1, 14, 0, 0),
-    "kwh": 12.34,
-    "card_id": "NL-ABC-123456-0",
-    "card_name": "Card Name",
-    "total_costs": 5.97,
-    "total_costs_ex_vat": 4.93,
-    "vat": 21,
-    "currency": "EUR"
-}
-```
+## Development
+
+- **Install** (editable, with dev extras): `uv sync --extra dev` (or `pip install -e ".[dev]"`).
+- **Pre-commit**: the repo ships a `.pre-commit-config.yaml`, but git installs no hooks on clone, so
+  it is a one-time manual step — run `uvx pre-commit install`.
+- **Contributions** and feature requests are welcome.
+
+## Changelog
+
+See [CHANGELOG.md](https://github.com/rogiervandergeer/pybluecurrent/blob/main/CHANGELOG.md).

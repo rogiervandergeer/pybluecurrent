@@ -564,7 +564,7 @@ class BlueCurrentClient:
             if not status.get("success"):
                 raise BlueCurrentException(status)
 
-    async def unlock_connector(self, evse_id: str):
+    async def unlock_connector(self, evse_id: str) -> None:
         """Unlock the connector of a charge point. Raises ``BlueCurrentException`` if it fails."""
         flow_id = str(uuid4())
         async with self._command("UNLOCK_CONNECTOR"):
@@ -574,9 +574,8 @@ class BlueCurrentClient:
             status = await self._receive("STATUS_UNLOCK_CONNECTOR", timeout=self.command_timeout, flow_id=flow_id)
             if not status.get("success"):
                 raise BlueCurrentException(status)
-            return status
 
-    async def soft_reset(self, evse_id: str):
+    async def soft_reset(self, evse_id: str) -> None:
         """Soft-reset a charge point. Raises ``BlueCurrentException`` if it fails."""
         flow_id = str(uuid4())
         async with self._command("SOFT_RESET"):
@@ -586,7 +585,6 @@ class BlueCurrentClient:
             status = await self._receive("STATUS_SOFT_RESET", timeout=self.command_timeout, flow_id=flow_id)
             if not status.get("success"):
                 raise BlueCurrentException(status)
-            return status
 
     async def get_charge_point_status(self, evse_id: str) -> ChargePointStatus:
         """
