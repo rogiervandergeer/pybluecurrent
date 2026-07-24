@@ -2,7 +2,7 @@ from asyncio import CancelledError, Event, Lock, Task, create_task, get_running_
 from asyncio import TimeoutError as AsyncTimeoutError
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
-from datetime import time
+from datetime import date, time
 from json import JSONDecodeError, dumps, loads
 from logging import getLogger
 from random import uniform
@@ -38,6 +38,7 @@ from pybluecurrent.models import (
     TransactionsPage,
 )
 from pybluecurrent.utilities import (
+    format_date,
     format_time,
     parse_datetime_keys,
     parse_list_datetime_keys,
@@ -796,7 +797,14 @@ class BlueCurrentClient:
         response.raise_for_status()
         return response.json()["grids"]
 
-    async def get_transactions(self, evse_id: str, newest_first: bool = True, page: int = 1) -> TransactionsPage:
+    async def get_transactions(
+        self,
+        evse_id: str,
+        newest_first: bool = True,
+        page: int = 1,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> TransactionsPage:
         """
         Get a list of transactions.
 
@@ -804,6 +812,8 @@ class BlueCurrentClient:
             evse_id: A charge point ID.
             newest_first: If True, start with the most recent transaction. Defaults to True.
             page: Page to get. Defaults to 1.
+            start_date: Only return transactions from this date onwards. Omitted by default.
+            end_date: Only return transactions up to this date. Omitted by default.
 
         Returns:
             A dictionary like this:
@@ -835,11 +845,17 @@ class BlueCurrentClient:
         """
         if self.httpx_client is None:
             raise RuntimeError(f"{self.__class__.__name__} is not connected.")
+        query = [
+            f"page={page}",
+            f"sort_field_order={'DESC' if newest_first else 'ASC'}",
+            "sort_field=stoppedtimestamp",
+        ]
+        if start_date is not None:
+            query.append(f"start_date={format_date(start_date)}")
+        if end_date is not None:
+            query.append(f"end_date={format_date(end_date)}")
         response = await self.httpx_client.post(
-            f"{self.api_url}/gettransactions?"
-            f"page={page}&"
-            f"sort_field_order={'DESC' if newest_first else 'ASC'}&"
-            f"sort_field=stoppedtimestamp",
+            f"{self.api_url}/gettransactions?" + "&".join(query),
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
             content=dumps({"chargepoints": [{"chargepoint_id": evse_id}]}),
         )
@@ -851,13 +867,21 @@ class BlueCurrentClient:
         )
         return result
 
-    async def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> AsyncIterable[Transaction]:
+    async def iterate_transactions(
+        self,
+        evse_id: str,
+        newest_first: bool = True,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> AsyncIterable[Transaction]:
         """
         Iterate through your transactions.
 
         Args:
             evse_id: A charge point ID.
             newest_first: If True, start with the most recent transaction. Defaults to True.
+            start_date: Only return transactions from this date onwards. Omitted by default.
+            end_date: Only return transactions up to this date. Omitted by default.
 
         Returns:
             An iterable of dictionaries describing the transactions.
@@ -880,7 +904,13 @@ class BlueCurrentClient:
         """
         next_page = 1
         while next_page is not None:
-            transactions = await self.get_transactions(evse_id=evse_id, newest_first=newest_first, page=next_page)
+            transactions = await self.get_transactions(
+                evse_id=evse_id,
+                newest_first=newest_first,
+                page=next_page,
+                start_date=start_date,
+                end_date=end_date,
+            )
             for tx in transactions["transactions"]:
                 yield tx
             next_page = transactions["next_page"]
