@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project is pre-1.0: breaking changes may land in minor releases.
 
-## [Unreleased]
+## [0.3.0] - 2026-07-25
 
 ### Added
 
@@ -26,15 +26,12 @@ This project is pre-1.0: breaking changes may land in minor releases.
 - Websocket connection failures are now surfaced instead of hanging. When the handler stops (the connection drops, or an unexpected error), pending and subsequent calls raise `ConnectionLost` immediately rather than blocking until they time out. A single malformed (non-JSON) frame is now logged and skipped instead of silently killing the connection.
 - `_receive` now enforces a single per-call deadline (a stream of unrelated frames can no longer postpone it indefinitely) and raises `RequestTimeout` rather than a bare `TimeoutError`.
 - `set_status()`, `unlock_connector()` and `soft_reset()` now raise `BlueCurrentException` when the command fails (a `STATUS_` frame with `success: false`), instead of `set_status()` returning silently or the others handing back the failed frame. On success all three now return `None` (previously `unlock_connector()` and `soft_reset()` returned the raw status frame), so the command methods are consistent. Their wait for that verdict is also longer (a new `command_timeout`, default 60s), so the backend's own ~30s answer is no longer cut off just before it arrives.
+- Logging now uses a module logger (`pybluecurrent.client`) instead of a fixed `BlueCurrentClient` name, and the reconnect failure paths (attempts, back-off, wait-timeouts, and permanent give-up) are logged.
 
 ### Fixed
 
 - The session token is no longer written to debug logs. Received frames were logged verbatim at debug level, which included the token carried by the login-response frames; those fields are now masked.
 - The client no longer leaks the websocket, handler task, or HTTP client when connecting fails partway (for example on a rejected login), and teardown now awaits the handler and closes the HTTP client even if closing the websocket errors.
-
-### Changed
-
-- Logging now uses a module logger (`pybluecurrent.client`) instead of a fixed `BlueCurrentClient` name, and the reconnect failure paths (attempts, back-off, wait-timeouts, and permanent give-up) are logged.
 
 ## [0.2.0] - 2026-07-11
 
@@ -64,6 +61,6 @@ This project is pre-1.0: breaking changes may land in minor releases.
 - `get_account` returns `first_login_app` as a `datetime` (previously a `date`).
 - Internal: switched tooling to Ruff and ty, added a Python 3.10–3.13 CI matrix, and moved to PyPI trusted publishing (OIDC).
 
-[Unreleased]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.2.0...HEAD
+[0.3.0]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.1.1...0.2.0
 [0.1.1]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.1.0...0.1.1
