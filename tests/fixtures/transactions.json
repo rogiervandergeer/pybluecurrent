@@ -1,0 +1,60 @@
+{
+  "data": {
+    "current_page": 1,
+    "max_per_page": 25,
+    "next_page": null,
+    "total_pages": 1,
+    "total_transactions": 3,
+    "transactions": [
+      {
+        "card_id": "NL-ABC-123456-0",
+        "card_name": "Your Card",
+        "chargepoint_id": "BCU123456",
+        "chargepoint_type": "HIDDEN",
+        "currency": "EUR",
+        "end_time": "03-07-2026 11:00:00",
+        "evse_name": "Charge Point Name",
+        "kwh": 5.0,
+        "reimbursement_tariff_ex_vat": 0.4,
+        "started_at": "03-07-2026 10:00:00",
+        "total_costs": 2.42,
+        "total_costs_ex_vat": 2.0,
+        "transaction_id": 3,
+        "vat": 21
+      },
+      {
+        "card_id": "NL-ABC-123456-0",
+        "card_name": "Your Card",
+        "chargepoint_id": "BCU123456",
+        "chargepoint_type": "HIDDEN",
+        "currency": "EUR",
+        "end_time": "01-07-2026 09:30:00",
+        "evse_name": "Charge Point Name",
+        "kwh": 12.34,
+        "reason_no_settlement": "not settled",
+        "reimbursement_tariff_ex_vat": 0.4,
+        "started_at": "01-07-2026 08:00:00",
+        "total_costs": 5.97,
+        "total_costs_ex_vat": 4.93,
+        "transaction_id": 1,
+        "vat": 21
+      },
+      {
+        "card_id": "NL-ABC-123456-0",
+        "card_name": "Your Card",
+        "chargepoint_id": "BCU123456",
+        "chargepoint_type": "HIDDEN",
+        "currency": "EUR",
+        "end_time": "02-07-2026 22:15:00",
+        "evse_name": "Charge Point Name",
+        "kwh": 8.5,
+        "reimbursement_tariff_ex_vat": 0.4,
+        "started_at": "02-07-2026 20:00:00",
+        "total_costs": 4.11,
+        "total_costs_ex_vat": 3.4,
+        "transaction_id": 2,
+        "vat": 21
+      }
+    ]
+  }
+}

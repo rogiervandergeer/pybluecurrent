@@ -49,6 +49,29 @@ client = BlueCurrentClient(api_token="your_api_token")
 Retrieve or rotate the token with [`get_api_token`](#get_api_token) and
 [`generate_api_token`](#generate_api_token), or from the [BlueCurrent website](https://my.bluecurrent.nl).
 
+## Command line
+
+Installing the package also installs a `pybluecurrent` command, which exports your transactions:
+
+```shell
+export BLUECURRENT_USERNAME="your_username"
+export BLUECURRENT_PASSWORD="your_secret_password"
+
+pybluecurrent transactions --format csv -o transactions.csv
+pybluecurrent transactions --format json --days 30
+pybluecurrent transactions --format jsonl --evse-id BCU123456
+```
+
+Credentials come from `BLUECURRENT_USERNAME` / `BLUECURRENT_PASSWORD` (or `BLUECURRENT_API_TOKEN`),
+or from the matching `--username` / `--password` / `--api-token` options.
+
+**Options**
+- `--format`: `csv` (default), `json` (one array) or `jsonl` (one object per line).
+- `--evse-id`: Charge point to export, repeatable. Defaults to all of your charge points.
+- `--days`: Only export the last N days. Defaults to your whole history.
+- `-o`, `--output`: Write to a file instead of stdout.
+- `--newest-first` / `--oldest-first`: Output order, newest first by default.
+
 ## Methods
 
 Every method is a coroutine on `BlueCurrentClient`; call them inside the async context (see
@@ -341,7 +364,14 @@ be undone. While it is active, [`get_charge_point_status`](#get_charge_point_sta
 #### get_transactions
 
 ```python
-async def get_transactions(self, evse_id: str, newest_first: bool = True, page: int = 1) -> TransactionsPage
+async def get_transactions(
+    self,
+    evse_id: str,
+    newest_first: bool = True,
+    page: int = 1,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> TransactionsPage
 ```
 
 Returns a single page of transactions as a [`TransactionsPage`](#response-models); its
@@ -351,11 +381,19 @@ Returns a single page of transactions as a [`TransactionsPage`](#response-models
 - `evse_id`: The ID of the charge point.
 - `newest_first`: If `True`, start with the most recent transaction. Defaults to `True`.
 - `page`: Page number to get. Defaults to `1`.
+- `start_date`: Only return transactions from this date onwards. Omitted by default.
+- `end_date`: Only return transactions up to this date. Omitted by default.
 
 #### iterate_transactions
 
 ```python
-async def iterate_transactions(self, evse_id: str, newest_first: bool = True) -> AsyncIterable[Transaction]
+async def iterate_transactions(
+    self,
+    evse_id: str,
+    newest_first: bool = True,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> AsyncIterable[Transaction]
 ```
 
 Iterates over all your transactions, fetching further pages as needed. Yields
@@ -364,6 +402,8 @@ Iterates over all your transactions, fetching further pages as needed. Yields
 **Arguments**
 - `evse_id`: The ID of the charge point.
 - `newest_first`: If `True`, start with the most recent transaction. Defaults to `True`.
+- `start_date`: Only return transactions from this date onwards. Omitted by default.
+- `end_date`: Only return transactions up to this date. Omitted by default.
 
 ## Development
 
