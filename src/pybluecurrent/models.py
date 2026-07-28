@@ -167,6 +167,10 @@ class ChargePoint(_ChargePointCommon, _ChargePointCards):
 
     A disabled smart-charging profile is still present, slimmed to its ``{value, permission}``
     wrapper; its schedule/settings fields appear only while the profile is enabled.
+
+    ``activity`` is a single unit-level value. For a multi-socket charge point (``len(socket_ids) >
+    1``) it does not describe an individual socket; use ``get_charge_point_statuses`` for the
+    authoritative per-socket status.
     """
 
     name: str
@@ -224,7 +228,7 @@ class ChargePointStatus(TypedDict):
     total_cost: float
     vehicle_status: str
     evse_id: str
-    socket_id: int  # the socket this status describes
+    socket_id: int
 
 
 class Contract(TypedDict):
@@ -248,7 +252,7 @@ class Grid(TypedDict):
 class _TransactionBase(TypedDict):
     transaction_id: int
     chargepoint_id: str
-    socket_id: int  # the socket the session took place on
+    socket_id: int
     chargepoint_type: str
     evse_name: str
     started_at: datetime | None
