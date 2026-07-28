@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project is pre-1.0: breaking changes may land in minor releases.
 
+## [Unreleased]
+
+### Added
+
+- `get_charge_point_statuses()` returns the live status of every socket of a charge point, each a `ChargePointStatus` tagged with its `socket_id`. Single-socket charge points return a one-element list; dual-socket models (such as the NanoXL) return one entry per socket.
+- `get_charge_point_status()` gains a `socket_id` argument (default 1) to select a socket. `ChargePointStatus` now carries a `socket_id`, `ChargePoint` a `socket_ids` list, and `Transaction` a `socket_id`.
+
+### Changed
+
+- `get_charge_point_status()` now reads the multi-socket-aware v2.1 status endpoint. The returned status describes a single socket (selected with `socket_id`), so it now also carries that `socket_id`; single-socket callers are otherwise unaffected.
+
 ## [0.3.0] - 2026-07-25
 
 ### Added

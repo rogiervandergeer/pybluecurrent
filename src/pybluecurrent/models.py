@@ -171,6 +171,7 @@ class ChargePoint(_ChargePointCommon, _ChargePointCards):
 
     name: str
     activity: str
+    socket_ids: list[int]  # the sockets this charge point has (one for most, two for dual-socket models)
 
 
 class ChargePointSettings(_ChargePointCommon, _ChargePointCards):
@@ -223,6 +224,7 @@ class ChargePointStatus(TypedDict):
     total_cost: float
     vehicle_status: str
     evse_id: str
+    socket_id: int  # the socket this status describes
 
 
 class Contract(TypedDict):
@@ -246,6 +248,7 @@ class Grid(TypedDict):
 class _TransactionBase(TypedDict):
     transaction_id: int
     chargepoint_id: str
+    socket_id: int  # the socket the session took place on
     chargepoint_type: str
     evse_name: str
     started_at: datetime | None

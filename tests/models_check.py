@@ -15,12 +15,12 @@ matters because the credentialed suite is rate-limited to a single login per run
 """
 
 import warnings
-from typing import Any, get_args, get_origin, get_type_hints, is_typeddict
+from typing import Any, Collection, get_args, get_origin, get_type_hints, is_typeddict
 
 from typeguard import TypeCheckError, check_type
 
 
-def _walk(value: Any, model: Any, path: str, errors: list[str], undeclared: list[str]) -> None:
+def _walk(value: Any, model: Any, path: str, errors: list[str], undeclared: list[str], ignore: set[str]) -> None:
     if is_typeddict(model):
         if not isinstance(value, dict):
             errors.append(f"{path or '<root>'}: expected a dict, got {type(value).__name__}")
@@ -28,11 +28,11 @@ def _walk(value: Any, model: Any, path: str, errors: list[str], undeclared: list
         hints = get_type_hints(model)
         required = getattr(model, "__required_keys__", frozenset())
         for key in value:
-            if key not in hints:
+            if key not in hints and key not in ignore:
                 undeclared.append(f"{path}{key}")
         for key, annotation in hints.items():
             if key in value:
-                _walk(value[key], annotation, f"{path}{key}.", errors, undeclared)
+                _walk(value[key], annotation, f"{path}{key}.", errors, undeclared, ignore)
             elif key in required:
                 errors.append(f"{path}{key}: missing required key")
         return
@@ -42,7 +42,7 @@ def _walk(value: Any, model: Any, path: str, errors: list[str], undeclared: list
             return
         (element_model,) = get_args(model) or (Any,)
         for item in value:
-            _walk(item, element_model, path, errors, undeclared)
+            _walk(item, element_model, path, errors, undeclared, ignore)
         return
     # Leaf (scalar, or a union such as ``datetime | None``): let typeguard judge it.
     try:
@@ -51,14 +51,15 @@ def _walk(value: Any, model: Any, path: str, errors: list[str], undeclared: list
         errors.append(f"{path.rstrip('.') or '<root>'}: {error}")
 
 
-def assert_model(value: Any, model: Any) -> None:
+def assert_model(value: Any, model: Any, ignore: Collection[str] = frozenset()) -> None:
     """Assert a response matches its model; fail on declared drift, warn on undeclared keys.
 
-    ``model`` may be a TypedDict or ``list[SomeTypedDict]``.
+    ``model`` may be a TypedDict or ``list[SomeTypedDict]``. ``ignore`` names keys that are known but
+    deliberately unmodelled, so they are neither warned about nor failed on.
     """
     errors: list[str] = []
     undeclared: list[str] = []
-    _walk(value, model, "", errors, undeclared)
+    _walk(value, model, "", errors, undeclared, set(ignore))
     name = getattr(model, "__name__", str(model))
     if undeclared:
         warnings.warn(f"{name}: undeclared API keys (not yet modelled): {sorted(set(undeclared))}", stacklevel=2)

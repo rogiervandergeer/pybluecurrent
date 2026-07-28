@@ -67,6 +67,10 @@
       },
       "smart_charging": true,
       "smart_charging_dynamic": true,
+      "socket_id": 1,
+      "socket_ids": [
+        1
+      ],
       "tariff": {
         "currency": "EUR",
         "price_ex_vat": 0.2,

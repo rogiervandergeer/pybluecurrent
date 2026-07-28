@@ -69,9 +69,11 @@ class TestSocketApi:
         charge_points = await connected_client.get_charge_points()
         if len(charge_points) == 0:
             skip(reason="No charge cards.")
-        assert_model(charge_points, list[ChargePoint])
+        # The aggregate carries a nullable singular socket_id we deliberately don't model; ignore it.
+        assert_model(charge_points, list[ChargePoint], ignore={"socket_id"})
         for charge_point in charge_points:
             assert "evse_id" in charge_point
+            assert "socket_ids" in charge_point
 
     async def test_get_grid_status(self, connected_client: BlueCurrentClient, evse_id: str):
         status = await connected_client.get_grid_status(evse_id=evse_id)
@@ -317,6 +319,13 @@ class TestRestApi:
         assert_model(status, ChargePointStatus)
         assert status["evse_id"] == evse_id
         assert "activity" in status
+        assert "socket_id" in status
+
+    async def test_get_charge_point_statuses(self, connected_client: BlueCurrentClient, evse_id: str):
+        statuses = await connected_client.get_charge_point_statuses(evse_id)
+        assert_model(statuses, list[ChargePointStatus])
+        assert len(statuses) >= 1
+        assert all(status["evse_id"] == evse_id for status in statuses)
 
     async def test_get_grids(self, connected_client: BlueCurrentClient):
         grids = await connected_client.get_grids()
