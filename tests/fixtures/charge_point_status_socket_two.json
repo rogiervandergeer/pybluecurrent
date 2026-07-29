@@ -1,0 +1,31 @@
+{
+  "evse_id": "BCU654321",
+  "items": [
+    {
+      "activity": "available",
+      "actual_kwh": 0,
+      "actual_p1": 0,
+      "actual_p2": 0,
+      "actual_p3": 0,
+      "actual_v1": 0,
+      "actual_v2": 0,
+      "actual_v3": 0,
+      "boosting": false,
+      "evse_id": "BCU654321",
+      "max_offline": 10,
+      "max_usage": 20,
+      "offline_since": "",
+      "smartcharging_max_usage": 6,
+      "socket_id": 2,
+      "start_datetime": null,
+      "stop_datetime": null,
+      "total_cost": 0,
+      "vehicle_status": "A"
+    }
+  ],
+  "object": "CH_STATUS",
+  "socket_id": null,
+  "socket_ids": [
+    2
+  ]
+}

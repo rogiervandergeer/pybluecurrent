@@ -6,6 +6,7 @@ from fake_socket import FakeSocket, make_fake_connect
 from pytest import MonkeyPatch, fixture, skip
 
 from pybluecurrent import BlueCurrentClient
+from pybluecurrent.models import ChargePoint
 
 
 @fixture(scope="function")
@@ -62,8 +63,20 @@ async def connected_client() -> AsyncGenerator[BlueCurrentClient, None]:
 
 
 @fixture(scope="session")
-async def evse_id(connected_client: BlueCurrentClient) -> str:
+async def charge_point(connected_client: BlueCurrentClient) -> ChargePoint:
+    """The charge point the live tests address — fetched once, so evse_id and socket_id agree."""
     charge_points = await connected_client.get_charge_points()
     if not charge_points:
         skip("No charge points available.")
-    return charge_points[0]["evse_id"]  # type: ignore
+    return charge_points[0]
+
+
+@fixture(scope="session")
+def evse_id(charge_point: ChargePoint) -> str:
+    return charge_point["evse_id"]
+
+
+@fixture(scope="session")
+def socket_id(charge_point: ChargePoint) -> int:
+    """A socket that exists on that charge point, so the tests don't assume it is numbered 1."""
+    return charge_point["socket_ids"][0]

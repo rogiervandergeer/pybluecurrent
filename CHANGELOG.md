@@ -10,7 +10,7 @@ This project is pre-1.0: breaking changes may land in minor releases.
 ### Added
 
 - `get_charge_point_statuses()` returns the live status of every socket of a charge point, each a `ChargePointStatus` tagged with its `socket_id`. Single-socket charge points return a one-element list; dual-socket models (such as the NanoXL) return one entry per socket.
-- `get_charge_point_status()` gains a `socket_id` argument (default 1) to select a socket. `ChargePointStatus` now carries a `socket_id`, `ChargePoint` a `socket_ids` list, and `Transaction` a `socket_id`.
+- `get_charge_point_status()` gains a `socket_id` argument to select a socket. It may be omitted for a single-socket charge point, which returns that socket whatever its number; for a multi-socket charge point it is required, as there is no sensible default between the sockets. `ChargePointStatus` now carries a `socket_id`, `ChargePoint` a `socket_ids` list, and `Transaction` a `socket_id`. The transactions CSV export gains a `socket_id` column.
 
 ### Changed
 

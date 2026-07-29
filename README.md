@@ -167,18 +167,20 @@ is already included in the response of [`get_charge_points`](#get_charge_points)
 #### get_charge_point_status
 
 ```python
-async def get_charge_point_status(self, evse_id: str, socket_id: int = 1) -> ChargePointStatus
+async def get_charge_point_status(self, evse_id: str, socket_id: int | None = None) -> ChargePointStatus
 ```
 
 Returns the live status of a single socket as a [`ChargePointStatus`](#response-models). Most charge
-points have a single socket, numbered 1, so the default returns it. Dual-socket models (such as the
-NanoXL) have a socket per side: pass the `socket_id` you want, or use
-[`get_charge_point_statuses`](#get_charge_point_statuses) to fetch them all. Raises `ValueError` if the
-charge point has no socket with the given `socket_id`.
+points have a single socket, and omitting `socket_id` returns it whatever its number. Dual-socket
+models (such as the NanoXL) have a socket per side, and there is no sensible default between them:
+name the `socket_id` you want, or use
+[`get_charge_point_statuses`](#get_charge_point_statuses) to fetch them all. Raises `ValueError` if
+the charge point has no socket with the given `socket_id`, or if `socket_id` is omitted for a
+multi-socket charge point.
 
 **Arguments**
 - `evse_id`: The ID of the charge point.
-- `socket_id`: The socket to fetch. Defaults to 1.
+- `socket_id`: The socket to fetch. May be omitted for a single-socket charge point.
 
 #### get_charge_point_statuses
 

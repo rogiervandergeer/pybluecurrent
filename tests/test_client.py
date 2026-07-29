@@ -138,8 +138,8 @@ class TestSocketApi:
         assert await connected_client.get_charge_point_settings(evse_id=evse_id) == settings
 
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
-    async def test_set_status(self, connected_client: BlueCurrentClient, evse_id: str):
-        before_status = await connected_client.get_charge_point_status(evse_id=evse_id)
+    async def test_set_status(self, connected_client: BlueCurrentClient, evse_id: str, socket_id: int):
+        before_status = await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id)
         if before_status["activity"] != "available":
             skip(reason="Only perform this test if the charge point is available.")
         try:
@@ -151,9 +151,13 @@ class TestSocketApi:
             if isinstance(exc.args[0], dict) and exc.args[0].get("error") == "TIMEOUT":
                 skip(reason="Charge point is not acknowledging status changes (backend TIMEOUT).")
             raise
-        assert (await connected_client.get_charge_point_status(evse_id=evse_id))["activity"] == "unavailable"
+        assert (await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id))[
+            "activity"
+        ] == "unavailable"
         await connected_client.set_status(evse_id=evse_id, enabled=True)
-        assert (await connected_client.get_charge_point_status(evse_id=evse_id))["activity"] == "available"
+        assert (await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id))[
+            "activity"
+        ] == "available"
 
     async def test_error(self, connected_client: BlueCurrentClient):
         with raises(BlueCurrentException) as e:
@@ -182,9 +186,9 @@ async def _restore_active_profile(client: BlueCurrentClient, evse_id: str, activ
 
 
 class TestDelayedCharging:
-    async def test_status_reports_boosting(self, connected_client: BlueCurrentClient, evse_id: str):
+    async def test_status_reports_boosting(self, connected_client: BlueCurrentClient, evse_id: str, socket_id: int):
         # The read-back for boost(); assert it is there, so we notice if the backend drops it.
-        status = await connected_client.get_charge_point_status(evse_id)
+        status = await connected_client.get_charge_point_status(evse_id, socket_id=socket_id)
         assert isinstance(status["boosting"], bool)
 
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
@@ -214,11 +218,11 @@ class TestDelayedCharging:
         assert await _get_delayed_charging() == before
 
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
-    async def test_set_delayed_charging(self, connected_client: BlueCurrentClient, evse_id: str):
+    async def test_set_delayed_charging(self, connected_client: BlueCurrentClient, evse_id: str, socket_id: int):
         settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
         if settings["delayed_charging"]["permission"] != "write":
             skip(reason="No permission to change delayed charging.")
-        status = await connected_client.get_charge_point_status(evse_id=evse_id)
+        status = await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id)
         if status["activity"] == "charging":
             # Toggling a smart charging profile could interrupt a running session.
             skip(reason="Do not interrupt an ongoing charging session.")
@@ -242,14 +246,16 @@ class TestDelayedCharging:
 
 class TestPriceBasedCharging:
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
-    async def test_set_price_based_charging_settings(self, connected_client: BlueCurrentClient, evse_id: str):
+    async def test_set_price_based_charging_settings(
+        self, connected_client: BlueCurrentClient, evse_id: str, socket_id: int
+    ):
         async def _get_price_based_charging() -> dict:
             settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
             return settings["price_based_charging"]
 
         if (await _get_price_based_charging())["permission"] != "write":
             skip(reason="No permission to change the price-based charging settings.")
-        status = await connected_client.get_charge_point_status(evse_id=evse_id)
+        status = await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id)
         if status["activity"] == "charging":
             # Enabling price-based charging to read its settings back could interrupt a running session.
             skip(reason="Do not interrupt an ongoing charging session.")
@@ -281,11 +287,11 @@ class TestPriceBasedCharging:
             await _restore_active_profile(connected_client, evse_id, active_before)
 
     @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
-    async def test_set_price_based_charging(self, connected_client: BlueCurrentClient, evse_id: str):
+    async def test_set_price_based_charging(self, connected_client: BlueCurrentClient, evse_id: str, socket_id: int):
         settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
         if settings["price_based_charging"]["permission"] != "write":
             skip(reason="No permission to change price-based charging.")
-        status = await connected_client.get_charge_point_status(evse_id=evse_id)
+        status = await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id)
         if status["activity"] == "charging":
             # Toggling a smart charging profile could interrupt a running session.
             skip(reason="Do not interrupt an ongoing charging session.")
@@ -314,12 +320,12 @@ class TestRestApi:
         assert_model(contracts, list[Contract])
         assert "contract_id" in contracts[0]
 
-    async def test_get_charge_point_status(self, connected_client: BlueCurrentClient, evse_id: str):
-        status = await connected_client.get_charge_point_status(evse_id)
+    async def test_get_charge_point_status(self, connected_client: BlueCurrentClient, evse_id: str, socket_id: int):
+        status = await connected_client.get_charge_point_status(evse_id, socket_id=socket_id)
         assert_model(status, ChargePointStatus)
         assert status["evse_id"] == evse_id
+        assert status["socket_id"] == socket_id
         assert "activity" in status
-        assert "socket_id" in status
 
     async def test_get_charge_point_statuses(self, connected_client: BlueCurrentClient, evse_id: str):
         statuses = await connected_client.get_charge_point_statuses(evse_id)

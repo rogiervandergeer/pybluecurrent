@@ -28,7 +28,7 @@ def _walk(value: Any, model: Any, path: str, errors: list[str], undeclared: list
         hints = get_type_hints(model)
         required = getattr(model, "__required_keys__", frozenset())
         for key in value:
-            if key not in hints and key not in ignore:
+            if key not in hints and f"{path}{key}" not in ignore:
                 undeclared.append(f"{path}{key}")
         for key, annotation in hints.items():
             if key in value:
@@ -55,7 +55,9 @@ def assert_model(value: Any, model: Any, ignore: Collection[str] = frozenset()) 
     """Assert a response matches its model; fail on declared drift, warn on undeclared keys.
 
     ``model`` may be a TypedDict or ``list[SomeTypedDict]``. ``ignore`` names keys that are known but
-    deliberately unmodelled, so they are neither warned about nor failed on.
+    deliberately unmodelled, so they are neither warned about nor failed on. Each entry is a full
+    dotted path as it would be reported (``"socket_id"`` at the root, ``"tariff.currency"`` nested),
+    so silencing a key at one level leaves a same-named key elsewhere still reported.
     """
     errors: list[str] = []
     undeclared: list[str] = []

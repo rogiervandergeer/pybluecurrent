@@ -229,11 +229,19 @@ class TestOfflineChargePointStatus:
         assert statuses[1]["activity"] == "charging"
         assert statuses[1]["start_datetime"] == datetime(2023, 7, 24, 15, 25, 33)
 
-    async def test_default_socket_is_one(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+    async def test_dual_socket_without_socket_id_raises(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        """There is no sensible default between two sockets, so the caller must name one."""
         fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
-        status = await offline_client.get_charge_point_status("BCU109470")
-        assert status["socket_id"] == 1
-        assert status["activity"] == "available"
+        with raises(ValueError, match="sockets \\[1, 2\\]"):
+            await offline_client.get_charge_point_status("BCU109470")
+
+    async def test_omitted_socket_id_returns_the_only_socket_whatever_its_number(
+        self, offline_client: BlueCurrentClient, fake_rest: FakeRest
+    ):
+        """A single-socket charge point numbered other than 1 must still answer the no-argument call."""
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_status_socket_two"))
+        status = await offline_client.get_charge_point_status("BCU654321")
+        assert status["socket_id"] == 2
 
     async def test_selects_requested_socket(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
         fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
@@ -245,6 +253,11 @@ class TestOfflineChargePointStatus:
         fake_rest.on("chargepointstatus", load_fixture("charge_point_status"))
         with raises(ValueError):
             await offline_client.get_charge_point_status("BCU123456", socket_id=2)
+
+    async def test_no_sockets_raises(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("chargepointstatus", {"object": "CH_STATUS", "evse_id": "BCU123456", "items": []})
+        with raises(ValueError):
+            await offline_client.get_charge_point_status("BCU123456")
 
 
 class TestOfflineTwoPhaseCommands:
