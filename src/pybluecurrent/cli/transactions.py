@@ -21,6 +21,7 @@ from pybluecurrent.utilities import to_jsonable
 FIELDNAMES = [
     "transaction_id",
     "chargepoint_id",
+    "socket_id",
     "chargepoint_type",
     "evse_name",
     "started_at",

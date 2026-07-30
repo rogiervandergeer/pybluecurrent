@@ -26,6 +26,7 @@ from pybluecurrent.models import (
     ChargeCard,
     ChargePoint,
     ChargePointSettings,
+    ChargePointStatus,
     GridStatus,
     SustainabilityStatus,
 )
@@ -153,8 +154,10 @@ class TestOfflineCommands:
     async def test_get_charge_points(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
         charge_points = await offline_client.get_charge_points()
-        assert_model(charge_points, list[ChargePoint])
+        # The aggregate carries a nullable singular socket_id we deliberately don't model; ignore it.
+        assert_model(charge_points, list[ChargePoint], ignore={"socket_id"})
         assert charge_points[0]["evse_id"] == "BCU123456"
+        assert charge_points[0]["socket_ids"] == [1]
         assert charge_points[0]["plug_and_charge_charge_card"]["uid"] == "A1B2C3D4E5F6"
 
     async def test_get_grid_status(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
@@ -202,6 +205,59 @@ class TestOfflineCommands:
         with raises(BlueCurrentException) as exc:
             await offline_client.get_grid_status("BOGUS")
         assert exc.value.args[0]["message"] == "forbidden"
+
+
+class TestOfflineChargePointStatus:
+    """The v2.1 chargepointstatus endpoint: a per-socket items[] list, served over the REST fake."""
+
+    async def test_single_socket(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_status"))
+        status = await offline_client.get_charge_point_status("BCU123456")
+        assert_model(status, ChargePointStatus)
+        assert status["socket_id"] == 1
+        assert status["evse_id"] == "BCU123456"
+        assert status["activity"] == "available"
+        # Datetimes are parsed per item.
+        assert status["start_datetime"] == datetime(2023, 7, 24, 15, 25, 33)
+        assert status["stop_datetime"] == datetime(2023, 7, 26, 7, 48, 40)
+
+    async def test_statuses_returns_all_sockets(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
+        statuses = await offline_client.get_charge_point_statuses("BCU109470")
+        assert_model(statuses, list[ChargePointStatus])
+        assert [status["socket_id"] for status in statuses] == [1, 2]
+        assert statuses[1]["activity"] == "charging"
+        assert statuses[1]["start_datetime"] == datetime(2023, 7, 24, 15, 25, 33)
+
+    async def test_dual_socket_without_socket_id_raises(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        """There is no sensible default between two sockets, so the caller must name one."""
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
+        with raises(ValueError, match="sockets \\[1, 2\\]"):
+            await offline_client.get_charge_point_status("BCU109470")
+
+    async def test_omitted_socket_id_returns_the_only_socket_whatever_its_number(
+        self, offline_client: BlueCurrentClient, fake_rest: FakeRest
+    ):
+        """A single-socket charge point numbered other than 1 must still answer the no-argument call."""
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_status_socket_two"))
+        status = await offline_client.get_charge_point_status("BCU654321")
+        assert status["socket_id"] == 2
+
+    async def test_selects_requested_socket(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
+        status = await offline_client.get_charge_point_status("BCU109470", socket_id=2)
+        assert status["socket_id"] == 2
+        assert status["activity"] == "charging"
+
+    async def test_unknown_socket_raises(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_status"))
+        with raises(ValueError):
+            await offline_client.get_charge_point_status("BCU123456", socket_id=2)
+
+    async def test_no_sockets_raises(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("chargepointstatus", {"object": "CH_STATUS", "evse_id": "BCU123456", "items": []})
+        with raises(ValueError):
+            await offline_client.get_charge_point_status("BCU123456")
 
 
 class TestOfflineTwoPhaseCommands:

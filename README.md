@@ -78,7 +78,7 @@ Every method is a coroutine on `BlueCurrentClient`; call them inside the async c
 [Connection](#connection)). Charge points are addressed by their `evse_id`.
 
 - **Account & authentication** — [`get_account`](#get_account), [`get_api_token`](#get_api_token), [`generate_api_token`](#generate_api_token), [`get_contracts`](#get_contracts)
-- **Charge points & cards** — [`get_charge_points`](#get_charge_points), [`get_charge_point_settings`](#get_charge_point_settings), [`get_charge_point_status`](#get_charge_point_status), [`get_charge_cards`](#get_charge_cards)
+- **Charge points & cards** — [`get_charge_points`](#get_charge_points), [`get_charge_point_settings`](#get_charge_point_settings), [`get_charge_point_status`](#get_charge_point_status), [`get_charge_point_statuses`](#get_charge_point_statuses), [`get_charge_cards`](#get_charge_cards)
 - **Grid & sustainability** — [`get_grid_status`](#get_grid_status), [`get_grids`](#get_grids), [`get_sustainability_status`](#get_sustainability_status)
 - **Settings & control** — [`set_plug_and_charge_charge_card`](#set_plug_and_charge_charge_card), [`set_status`](#set_status), [`soft_reset`](#soft_reset)
 - **Smart charging** — [`set_delayed_charging`](#set_delayed_charging), [`set_delayed_charging_schedule`](#set_delayed_charging_schedule), [`set_price_based_charging`](#set_price_based_charging), [`set_price_based_charging_settings`](#set_price_based_charging_settings), [`boost`](#boost)
@@ -167,10 +167,30 @@ is already included in the response of [`get_charge_points`](#get_charge_points)
 #### get_charge_point_status
 
 ```python
-async def get_charge_point_status(self, evse_id: str) -> ChargePointStatus
+async def get_charge_point_status(self, evse_id: str, socket_id: int | None = None) -> ChargePointStatus
 ```
 
-Returns the live status of a charge point as a [`ChargePointStatus`](#response-models).
+Returns the live status of a single socket as a [`ChargePointStatus`](#response-models). Most charge
+points have a single socket, and omitting `socket_id` returns it whatever its number. Dual-socket
+models (such as the NanoXL) have a socket per side, and there is no sensible default between them:
+name the `socket_id` you want, or use
+[`get_charge_point_statuses`](#get_charge_point_statuses) to fetch them all. Raises `ValueError` if
+the charge point has no socket with the given `socket_id`, or if `socket_id` is omitted for a
+multi-socket charge point.
+
+**Arguments**
+- `evse_id`: The ID of the charge point.
+- `socket_id`: The socket to fetch. May be omitted for a single-socket charge point.
+
+#### get_charge_point_statuses
+
+```python
+async def get_charge_point_statuses(self, evse_id: str) -> list[ChargePointStatus]
+```
+
+Returns the live status of every socket of a charge point, each a
+[`ChargePointStatus`](#response-models). Single-socket charge points return a one-element list;
+dual-socket models return one entry per socket, each tagged with its `socket_id`.
 
 **Arguments**
 - `evse_id`: The ID of the charge point.

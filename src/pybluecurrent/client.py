@@ -93,7 +93,7 @@ def _redact(message):
 
 
 class BlueCurrentClient:
-    api_url: str = "https://api.bluecurrent.nl/app/bc_api/api/v2.0"
+    _api_base: str = "https://api.bluecurrent.nl/app/bc_api/api"
     psk: str = "d9ab2352a935be4ade182ce4921044f8"
     socket_url: str = "wss://motown.bluecurrent.nl/appserver/2.0"
     http_timeout: float = 30.0
@@ -114,6 +114,11 @@ class BlueCurrentClient:
     def __init__(self, username: str | None = None, password: str | None = None, api_token: str | None = None):
         if api_token is None and (username is None or password is None):
             raise ValueError("Provide either username and password, or api_token.")
+        # Derived here rather than in the class body so that overriding _api_base in a subclass moves
+        # both URLs with it. The status endpoint is the only one served at v2.1, where it becomes
+        # multi-socket aware; everything else stays at v2.0.
+        self.api_url: str = f"{self._api_base}/v2.0"
+        self.status_api_url: str = f"{self._api_base}/v2.1"
         self.connection = None
         self.consumer: Task | None = None
         self.credentials: tuple[str | None, str | None] = (username, password)
@@ -587,49 +592,96 @@ class BlueCurrentClient:
             if not status.get("success"):
                 raise BlueCurrentException(status)
 
-    async def get_charge_point_status(self, evse_id: str) -> ChargePointStatus:
+    async def get_charge_point_statuses(self, evse_id: str) -> list[ChargePointStatus]:
         """
-        Get the status of a charge point.
+        Get the status of every socket of a charge point.
+
+        Most charge points have a single socket, so the list has one entry. Dual-socket models
+        (such as the NanoXL) return one entry per socket, each tagged with its ``socket_id``. Use
+        get_charge_point_status to fetch a single socket.
+
+        Args:
+            evse_id: A charge point ID.
 
         Returns:
-            A dictionary with the status:
-            {
-                "actual_p1": 0,
-                "actual_p2": 0,
-                "actual_p3": 0,
-                "activity": "available",
-                "actual_v1": 0,
-                "actual_v2": 0,
-                "actual_v3": 0,
-                "actual_kwh": 0,
-                "boosting": False,
-                "max_usage": 20,
-                "smartcharging_max_usage": 6,
-                "max_offline": 10,
-                "offline_since": "",
-                "start_datetime": datetime(2023, 7, 24, 15, 25, 33),
-                "stop_datetime": datetime(2023, 7, 26, 7, 48, 40),
-                "total_cost": 9.93,
-                "vehicle_status": "A",
-                "evse_id": "BCU123456",
-            }
+            A list of dictionaries, each the status of one socket:
+            [
+                {
+                    "actual_p1": 0,
+                    "actual_p2": 0,
+                    "actual_p3": 0,
+                    "activity": "available",
+                    "actual_v1": 0,
+                    "actual_v2": 0,
+                    "actual_v3": 0,
+                    "actual_kwh": 0,
+                    "boosting": False,
+                    "max_usage": 20,
+                    "smartcharging_max_usage": 6,
+                    "max_offline": 10,
+                    "offline_since": "",
+                    "start_datetime": datetime(2023, 7, 24, 15, 25, 33),
+                    "stop_datetime": datetime(2023, 7, 26, 7, 48, 40),
+                    "total_cost": 9.93,
+                    "vehicle_status": "A",
+                    "evse_id": "BCU123456",
+                    "socket_id": 1,
+                }
+            ]
         """
         if self.httpx_client is None:
             raise RuntimeError(f"{self.__class__.__name__} is not connected.")
         response = await self.httpx_client.get(
-            f"{self.api_url}/chargepointstatus?evse_id={evse_id}",
+            f"{self.status_api_url}/chargepointstatus?evse_id={evse_id}",
             headers={"Authorization": f"Token {self.token}", "User-Agent": self._user_agent},
         )
         response.raise_for_status()
-        result = response.json()["data"]
-        parse_datetime_keys(
-            result,
-            formats={
-                "start_datetime": ("%Y%m%d %H:%M:%S", False),
-                "stop_datetime": ("%Y%m%d %H:%M:%S", False),
-            },
-        )
-        return cast(ChargePointStatus, result)
+        items = response.json()["items"]
+        for item in items:
+            parse_datetime_keys(
+                item,
+                formats={
+                    "start_datetime": ("%Y%m%d %H:%M:%S", False),
+                    "stop_datetime": ("%Y%m%d %H:%M:%S", False),
+                },
+            )
+        return cast(list[ChargePointStatus], items)
+
+    async def get_charge_point_status(self, evse_id: str, socket_id: int | None = None) -> ChargePointStatus:
+        """
+        Get the status of a single socket of a charge point.
+
+        Most charge points have a single socket, so omitting socket_id returns it whatever its
+        number. Dual-socket models (such as the NanoXL) have a socket per side, and there is no
+        sensible default between them: name the socket_id you want, or use
+        get_charge_point_statuses to fetch them all.
+
+        Args:
+            evse_id: A charge point ID.
+            socket_id: The socket to fetch. May be omitted for a single-socket charge point.
+
+        Returns:
+            A dictionary with the status of that socket — one entry of the list documented on
+            get_charge_point_statuses.
+
+        Raises:
+            ValueError: If the charge point has no socket with the given socket_id, if socket_id is
+                omitted for a multi-socket charge point, or if no sockets are reported at all.
+        """
+        statuses = await self.get_charge_point_statuses(evse_id)
+        if socket_id is None:
+            # Socket numbering is the backend's business: don't assume the only socket is number 1.
+            if len(statuses) == 1:
+                return statuses[0]
+            if not statuses:
+                raise ValueError(f"Charge point {evse_id} reports no sockets.")
+            sockets = sorted(status["socket_id"] for status in statuses)
+            raise ValueError(f"Charge point {evse_id} has sockets {sockets}; specify which one with socket_id.")
+        for status in statuses:
+            if status["socket_id"] == socket_id:
+                return status
+        sockets = sorted(status["socket_id"] for status in statuses)
+        raise ValueError(f"Charge point {evse_id} has sockets {sockets}; no socket {socket_id}.")
 
     async def set_delayed_charging(self, evse_id: str, enabled: bool) -> None:
         """
