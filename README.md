@@ -19,6 +19,22 @@ Compared to BlueCurrent's official [`bluecurrent-api`](https://github.com/bluecu
 - **Instance-scoped state** — no process-global mutable state.
 - **Username/password *or* API token** — the official client is API-token only.
 
+## Installation
+
+Requires Python 3.10 or newer. Install with pip:
+
+```shell
+pip install pybluecurrent
+```
+
+or with [uv](https://docs.astral.sh/uv/):
+
+```shell
+uv add pybluecurrent
+```
+
+This also installs the [`pybluecurrent` command](#command-line) — no extra needed.
+
 ## Usage
 
 Using the client is as simple as:
