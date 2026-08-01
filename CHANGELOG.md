@@ -11,10 +11,16 @@ This project is pre-1.0: breaking changes may land in minor releases.
 
 - `get_charge_point_statuses()` returns the live status of every socket of a charge point, each a `ChargePointStatus` tagged with its `socket_id`. Single-socket charge points return a one-element list; dual-socket models (such as the NanoXL) return one entry per socket.
 - `get_charge_point_status()` gains a `socket_id` argument to select a socket. It may be omitted for a single-socket charge point, which returns that socket whatever its number; for a multi-socket charge point it is required, as there is no sensible default between the sockets. `ChargePointStatus` now carries a `socket_id`, `ChargePoint` a `socket_ids` list, and `Transaction` a `socket_id`. The transactions CSV export gains a `socket_id` column.
+- `reboot()` fully reboots a charge point, alongside the existing software reset of `soft_reset()`.
 
 ### Changed
 
 - `get_charge_point_status()` now reads the multi-socket-aware v2.1 status endpoint. The returned status describes a single socket (selected with `socket_id`), so it now also carries that `socket_id`; single-socket callers are otherwise unaffected.
+- `set_status()` now sends the change over the REST endpoint the BlueCurrent apps use and awaits the backend's confirmation push; the websocket command it used to send is no longer completed by the backend (the acknowledgement arrived, but the verdict never did). It addresses a single socket and gains an optional `socket_id` argument, which may be omitted for a single-socket charge point.
+
+### Fixed
+
+- `unlock_connector()` now works: it posts to the REST endpoint the BlueCurrent apps use, where the websocket command it used to send is only implemented for portable (UMOVE) charge points — for which it now raises `NotImplementedError` instead. It gains an optional `socket_id` argument, and raises `ValueError` for an unknown charge point (previously the backend rejected it as forbidden).
 
 ## [0.3.0] - 2026-07-25
 

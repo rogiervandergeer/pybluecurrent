@@ -2,6 +2,7 @@ import logging
 from asyncio import CancelledError, create_task, gather, sleep
 from contextlib import suppress
 from datetime import date, datetime, time
+from unittest.mock import ANY
 
 from fake_rest import FakeRest, make_fake_async_client
 from fake_socket import (
@@ -274,41 +275,6 @@ class TestOfflineTwoPhaseCommands:
         for _ in range(10):
             await sleep(0)
 
-    async def test_set_status_success(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
-        fake_socket.on("SET_INOPERATIVE", {"object": "RECEIVED_SET_INOPERATIVE"})
-        task = create_task(offline_client.set_status("BCU123456", enabled=False))
-        await self._reach_status_wait()
-        fake_socket.feed({"object": "STATUS_SET_INOPERATIVE", "success": True})
-        assert await task is None
-
-    async def test_set_status_failure_raises(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
-        # The backend reports the charger's non-response as a STATUS_ frame with success=False; the
-        # command did nothing, so surface it instead of returning cleanly.
-        fake_socket.on("SET_INOPERATIVE", {"object": "RECEIVED_SET_INOPERATIVE"})
-        task = create_task(offline_client.set_status("BCU123456", enabled=False))
-        await self._reach_status_wait()
-        fake_socket.feed({"object": "STATUS_SET_INOPERATIVE", "success": False, "error": "TIMEOUT"})
-        with raises(BlueCurrentException) as exc:
-            await task
-        assert exc.value.args[0]["error"] == "TIMEOUT"
-
-    async def test_unlock_connector_success_returns_none(
-        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket
-    ):
-        fake_socket.on("UNLOCK_CONNECTOR", {"object": "RECEIVED_UNLOCK_CONNECTOR"})
-        task = create_task(offline_client.unlock_connector("BCU123456"))
-        await self._reach_status_wait()
-        fake_socket.feed({"object": "STATUS_UNLOCK_CONNECTOR", "success": True, "evse_id": "BCU123456"})
-        assert await task is None
-
-    async def test_unlock_connector_failure_raises(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
-        fake_socket.on("UNLOCK_CONNECTOR", {"object": "RECEIVED_UNLOCK_CONNECTOR"})
-        task = create_task(offline_client.unlock_connector("BCU123456"))
-        await self._reach_status_wait()
-        fake_socket.feed({"object": "STATUS_UNLOCK_CONNECTOR", "success": False, "error": "TIMEOUT"})
-        with raises(BlueCurrentException):
-            await task
-
     async def test_soft_reset_success_returns_none(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("SOFT_RESET", {"object": "RECEIVED_SOFT_RESET"})
         task = create_task(offline_client.soft_reset("BCU123456"))
@@ -323,6 +289,167 @@ class TestOfflineTwoPhaseCommands:
         fake_socket.feed({"object": "STATUS_SOFT_RESET", "success": False, "error": "TIMEOUT"})
         with raises(BlueCurrentException):
             await task
+
+    async def test_reboot_success_returns_none(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.on("REBOOT", {"object": "RECEIVED_REBOOT"})
+        task = create_task(offline_client.reboot("BCU123456"))
+        await self._reach_status_wait()
+        fake_socket.feed({"object": "STATUS_REBOOT", "success": True})
+        assert await task is None
+
+    async def test_reboot_failure_raises(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.on("REBOOT", {"object": "RECEIVED_REBOOT"})
+        task = create_task(offline_client.reboot("BCU123456"))
+        await self._reach_status_wait()
+        fake_socket.feed({"object": "STATUS_REBOOT", "success": False, "error": "TIMEOUT"})
+        with raises(BlueCurrentException):
+            await task
+
+
+class TestOfflineSetStatus:
+    """set_status: a REST action confirmed by a flow_id-correlated STATUS_ push over the websocket."""
+
+    @staticmethod
+    async def _feed_status(fake_rest: FakeRest, fake_socket: FakeSocket, frame: dict) -> None:
+        """Wait for the action POST, then feed the confirmation push correlated to its flow_id."""
+
+        def posted() -> bool:
+            return any(r.url.path.endswith(("setoperative", "setinoperative")) for r in fake_rest.requests)
+
+        await _wait_until(posted)
+        fake_socket.feed({"flow_id": fake_rest.last_body["flow_id"], **frame})
+
+    async def test_disable(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest):
+        task = create_task(offline_client.set_status("BCU123456", enabled=False, socket_id=1))
+        await self._feed_status(fake_rest, fake_socket, {"object": "STATUS_SET_INOPERATIVE", "success": True})
+        assert await task is None
+        assert fake_rest.last_path == "setinoperative"
+        assert fake_rest.last_body == {"chargepoint_id": "BCU123456", "socket_id": 1, "flow_id": ANY}
+        # The bce API authenticates with the bare token, without the "Token " prefix.
+        assert fake_rest.requests[-1].headers["Authorization"] == FAKE_TOKEN
+
+    async def test_enable(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest):
+        task = create_task(offline_client.set_status("BCU123456", enabled=True, socket_id=1))
+        await self._feed_status(fake_rest, fake_socket, {"object": "STATUS_SET_OPERATIVE", "success": True})
+        assert await task is None
+        assert fake_rest.last_path == "setoperative"
+
+    async def test_failure_raises(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        # The backend reports the charger's non-response as a STATUS_ push with success=False; the
+        # command did nothing, so surface it instead of returning cleanly.
+        task = create_task(offline_client.set_status("BCU123456", enabled=False, socket_id=1))
+        await self._feed_status(
+            fake_rest, fake_socket, {"object": "STATUS_SET_INOPERATIVE", "success": False, "error": "TIMEOUT"}
+        )
+        with raises(BlueCurrentException) as exc:
+            await task
+        assert exc.value.args[0]["error"] == "TIMEOUT"
+
+    async def test_ignores_another_flows_status(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        # The STATUS_ push is a broadcast correlated only by flow_id: one for a concurrent call
+        # (e.g. another socket) must not be mistaken for this call's verdict.
+        task = create_task(offline_client.set_status("BCU123456", enabled=False, socket_id=1))
+        await _wait_until(lambda: bool(fake_rest.requests))
+        flow_id = fake_rest.last_body["flow_id"]
+        fake_socket.feed({"object": "STATUS_SET_INOPERATIVE", "flow_id": "another", "success": False})
+        fake_socket.feed({"object": "STATUS_SET_INOPERATIVE", "flow_id": flow_id, "success": True})
+        assert await task is None
+
+    async def test_socket_is_resolved_when_omitted(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_status"))
+        task = create_task(offline_client.set_status("BCU123456", enabled=False))
+        await self._feed_status(fake_rest, fake_socket, {"object": "STATUS_SET_INOPERATIVE", "success": True})
+        assert await task is None
+        assert fake_rest.last_body["socket_id"] == 1
+
+    async def test_multi_socket_requires_socket_id(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
+        with raises(ValueError):
+            await offline_client.set_status("BCU109470", enabled=False)
+        # Only the status lookup went out; no action was posted.
+        assert fake_rest.last_path == "chargepointstatus"
+
+    async def test_rejection_is_raised(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("setinoperative", {"object": "ERROR", "error": 2, "message": "forbidden"}, status_code=401)
+        with raises(BlueCurrentException) as exc:
+            await offline_client.set_status("BCU123456", enabled=False, socket_id=1)
+        assert exc.value.args[0]["message"] == "forbidden"
+
+
+class TestOfflineUnlockConnector:
+    """unlock_connector: a fire-and-forget REST action, gated on the charge point's type."""
+
+    async def test_unlock(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest):
+        fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
+        await offline_client.unlock_connector("BCU123456")
+        assert fake_rest.last_path == "unlockconnector"
+        # The flow_id is the literal string "flow", and no confirmation push is awaited — this is
+        # exactly what the app sends.
+        assert fake_rest.last_body == {"chargepoint_id": "BCU123456", "socket_id": 1, "flow_id": "flow"}
+        assert fake_rest.requests[-1].headers["Authorization"] == FAKE_TOKEN
+        assert all(frame.get("command") != "UNLOCK_CONNECTOR" for frame in fake_socket.sent)
+
+    async def test_umove_is_not_implemented(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        # Portable (UMOVE) charge points unlock over a websocket command we do not support.
+        frame = load_fixture("charge_points")
+        frame["data"][0]["chargepoint_type"] = "UMOVE"
+        frame["data"][0]["is_cable"] = False
+        fake_socket.on("GET_CHARGE_POINTS", frame)
+        with raises(NotImplementedError):
+            await offline_client.unlock_connector("BCU123456")
+        assert fake_rest.requests == []
+        assert all(frame.get("command") != "UNLOCK_CONNECTOR" for frame in fake_socket.sent)
+
+    async def test_unknown_charge_point_raises(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
+        with raises(ValueError):
+            await offline_client.unlock_connector("BCU999999")
+        assert fake_rest.requests == []
+
+    async def test_multi_socket_requires_socket_id(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        frame = load_fixture("charge_points")
+        frame["data"][0]["socket_ids"] = [1, 2]
+        fake_socket.on("GET_CHARGE_POINTS", frame)
+        with raises(ValueError):
+            await offline_client.unlock_connector("BCU123456")
+        assert fake_rest.requests == []
+
+    async def test_unknown_socket_raises(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
+        with raises(ValueError):
+            await offline_client.unlock_connector("BCU123456", socket_id=2)
+        assert fake_rest.requests == []
+
+    async def test_failure_is_raised(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
+        fake_rest.on("unlockconnector", {"success": False, "error": "TIMEOUT"})
+        with raises(BlueCurrentException):
+            await offline_client.unlock_connector("BCU123456")
+
+    async def test_rejection_is_raised(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
+        fake_rest.on("unlockconnector", {"object": "ERROR", "error": 2, "message": "forbidden"}, status_code=401)
+        with raises(BlueCurrentException) as exc:
+            await offline_client.unlock_connector("BCU123456")
+        assert exc.value.args[0]["message"] == "forbidden"
 
 
 class TestOfflineConcurrency:
@@ -368,6 +495,27 @@ class TestOfflineConcurrency:
         with raises(BlueCurrentException) as exc:
             await task
         assert exc.value.args[0]["message"] == "mine"
+
+    async def test_async_command_ignores_another_flows_frame(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket
+    ):
+        # The wanted object may be a broadcast (e.g. a STATUS_ push): one correlated to a different
+        # flow belongs to a concurrent call and must be skipped, not returned.
+        task = create_task(offline_client._receive("STATUS_X", flow_id="F"))
+        await sleep(0)
+        fake_socket.feed({"object": "STATUS_X", "flow_id": "other", "success": False})
+        fake_socket.feed({"object": "STATUS_X", "flow_id": "F", "success": True})
+        assert (await task)["success"] is True
+
+    async def test_async_command_accepts_uncorrelated_frame(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket
+    ):
+        # A frame without a flow_id still matches a correlated waiter: not every backend reply
+        # echoes the flow_id, and a stricter rule would hang those commands.
+        task = create_task(offline_client._receive("STATUS_X", flow_id="F"))
+        await sleep(0)
+        fake_socket.feed({"object": "STATUS_X", "success": True})
+        assert (await task)["success"] is True
 
     async def test_async_command_claims_uncorrelated_error(
         self, offline_client: BlueCurrentClient, fake_socket: FakeSocket

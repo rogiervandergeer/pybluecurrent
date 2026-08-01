@@ -80,7 +80,7 @@ Every method is a coroutine on `BlueCurrentClient`; call them inside the async c
 - **Account & authentication** — [`get_account`](#get_account), [`get_api_token`](#get_api_token), [`generate_api_token`](#generate_api_token), [`get_contracts`](#get_contracts)
 - **Charge points & cards** — [`get_charge_points`](#get_charge_points), [`get_charge_point_settings`](#get_charge_point_settings), [`get_charge_point_status`](#get_charge_point_status), [`get_charge_point_statuses`](#get_charge_point_statuses), [`get_charge_cards`](#get_charge_cards)
 - **Grid & sustainability** — [`get_grid_status`](#get_grid_status), [`get_grids`](#get_grids), [`get_sustainability_status`](#get_sustainability_status)
-- **Settings & control** — [`set_plug_and_charge_charge_card`](#set_plug_and_charge_charge_card), [`set_status`](#set_status), [`soft_reset`](#soft_reset)
+- **Settings & control** — [`set_plug_and_charge_charge_card`](#set_plug_and_charge_charge_card), [`set_status`](#set_status), [`unlock_connector`](#unlock_connector), [`soft_reset`](#soft_reset), [`reboot`](#reboot)
 - **Smart charging** — [`set_delayed_charging`](#set_delayed_charging), [`set_delayed_charging_schedule`](#set_delayed_charging_schedule), [`set_price_based_charging`](#set_price_based_charging), [`set_price_based_charging_settings`](#set_price_based_charging_settings), [`boost`](#boost)
 - **Transactions** — [`get_transactions`](#get_transactions), [`iterate_transactions`](#iterate_transactions)
 
@@ -253,14 +253,30 @@ if the command fails.
 #### set_status
 
 ```python
-async def set_status(self, evse_id: str, enabled: bool) -> None
+async def set_status(self, evse_id: str, enabled: bool, socket_id: int | None = None) -> None
 ```
 
-Enables or disables a charge point. Raises `BlueCurrentException` if the command fails.
+Enables or disables a socket of a charge point. The call returns once the backend confirms the
+change, and raises `BlueCurrentException` if it fails — for example when the charge point does not
+respond.
 
 **Arguments**
 - `evse_id`: The ID of the charge point.
 - `enabled`: Boolean that indicates the desired status.
+- `socket_id`: The socket to enable or disable. May be omitted for a single-socket charge point.
+
+#### unlock_connector
+
+```python
+async def unlock_connector(self, evse_id: str, socket_id: int | None = None) -> None
+```
+
+Unlocks the connector of a charge point. Raises `BlueCurrentException` if the command fails, and
+`NotImplementedError` for portable (UMOVE) charge points, which are not supported.
+
+**Arguments**
+- `evse_id`: The ID of the charge point.
+- `socket_id`: The socket to unlock. May be omitted for a single-socket charge point.
 
 #### soft_reset
 
@@ -269,6 +285,18 @@ async def soft_reset(self, evse_id: str) -> None
 ```
 
 Soft-resets a charge point. Raises `BlueCurrentException` if the command fails.
+
+**Arguments**
+- `evse_id`: The ID of the charge point.
+
+#### reboot
+
+```python
+async def reboot(self, evse_id: str) -> None
+```
+
+Reboots a charge point — a full reboot, as opposed to the software reset of
+[`soft_reset`](#soft_reset). Raises `BlueCurrentException` if the command fails.
 
 **Arguments**
 - `evse_id`: The ID of the charge point.
