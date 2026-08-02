@@ -1,4 +1,4 @@
-from asyncio import CancelledError, Event, Lock, Task, create_task, get_running_loop, sleep, wait, wait_for
+from asyncio import CancelledError, Event, Lock, Queue, Task, create_task, get_running_loop, sleep, wait, wait_for
 from asyncio import TimeoutError as AsyncTimeoutError
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
@@ -10,7 +10,7 @@ from typing import Any, AsyncIterable, AsyncIterator, Iterable, cast
 from uuid import uuid4
 
 from asyncio_multisubscriber_queue import MultisubscriberQueue
-from httpx import AsyncClient
+from httpx import AsyncClient, HTTPStatusError
 from sjcl import SJCL
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
@@ -94,11 +94,13 @@ def _redact(message):
 
 class BlueCurrentClient:
     _api_base: str = "https://api.bluecurrent.nl/app/bc_api/api"
+    # The charge-point action endpoints (set_status, unlock_connector) live on a separate API.
+    _bce_api_base: str = "https://api.bluecurrent.nl/app/bce_api/api"
     psk: str = "d9ab2352a935be4ade182ce4921044f8"
     socket_url: str = "wss://motown.bluecurrent.nl/appserver/2.0"
     http_timeout: float = 30.0
-    # Two-phase commands (set_status, unlock_connector, soft_reset) await a STATUS_ verdict that the
-    # backend renders behind its own ~30s ceiling — the answer lands just after 30s, so wait longer.
+    # Commands awaiting a STATUS_ verdict (set_status, soft_reset, reboot): the backend renders it
+    # behind its own ~30s ceiling — the answer lands just after 30s, so wait longer.
     command_timeout: int = 60
     # Auto-reconnect: a supervisor reconnects after drops with exponential backoff, reusing the token.
     auto_reconnect: bool = True
@@ -119,6 +121,7 @@ class BlueCurrentClient:
         # multi-socket aware; everything else stays at v2.0.
         self.api_url: str = f"{self._api_base}/v2.0"
         self.status_api_url: str = f"{self._api_base}/v2.1"
+        self.bce_api_url: str = f"{self._bce_api_base}/v1"
         self.connection = None
         self.consumer: Task | None = None
         self.credentials: tuple[str | None, str | None] = (username, password)
@@ -552,43 +555,83 @@ class BlueCurrentClient:
         if not result.get("success"):
             raise BlueCurrentException(result)
 
-    async def set_status(self, evse_id: str, enabled: bool) -> None:
+    async def set_status(self, evse_id: str, enabled: bool, socket_id: int | None = None) -> None:
         """
-        Enable or disable a charge point.
+        Enable or disable a socket of a charge point.
+
+        The change is sent over REST, and the backend confirms it with a push message once the
+        charge point has acknowledged. Raises ``BlueCurrentException`` if the backend reports
+        failure (for example when the charge point does not respond).
 
         Args:
             evse_id: The ID of the charge point.
             enabled: Boolean that indicates the desired status.
+            socket_id: The socket to enable or disable. May be omitted for a single-socket
+                charge point.
         """
-        command = "SET_OPERATIVE" if enabled else "SET_INOPERATIVE"
+        if socket_id is None:
+            statuses = await self.get_charge_point_statuses(evse_id)
+            socket_id = self._resolve_socket_id(evse_id, [status["socket_id"] for status in statuses], None)
+        action = "setoperative" if enabled else "setinoperative"
+        status_object = "STATUS_SET_OPERATIVE" if enabled else "STATUS_SET_INOPERATIVE"
         flow_id = str(uuid4())
-        async with self._command(command):
+        async with self._command(status_object):
+            # The confirmation arrives over the websocket, so the connection must be up; subscribe
+            # before posting, as the push may otherwise race the HTTP response and be missed.
             await self._await_connected()
-            await self._send(dict(command=command, evse_id=evse_id, flow_id=flow_id), token=True)
-            await self._receive(f"RECEIVED_{command}", flow_id=flow_id)
-            status = await self._receive(f"STATUS_{command}", timeout=self.command_timeout, flow_id=flow_id)
+            with self.queue.queue() as q:
+                await self._post_action(action, dict(chargepoint_id=evse_id, socket_id=socket_id, flow_id=flow_id))
+                status = await self._receive_from(q, status_object, timeout=self.command_timeout, flow_id=flow_id)
             if not status.get("success"):
                 raise BlueCurrentException(status)
 
-    async def unlock_connector(self, evse_id: str) -> None:
-        """Unlock the connector of a charge point. Raises ``BlueCurrentException`` if it fails."""
-        flow_id = str(uuid4())
-        async with self._command("UNLOCK_CONNECTOR"):
-            await self._await_connected()
-            await self._send(dict(command="UNLOCK_CONNECTOR", evse_id=evse_id, flow_id=flow_id), token=True)
-            await self._receive("RECEIVED_UNLOCK_CONNECTOR", flow_id=flow_id)
-            status = await self._receive("STATUS_UNLOCK_CONNECTOR", timeout=self.command_timeout, flow_id=flow_id)
-            if not status.get("success"):
-                raise BlueCurrentException(status)
+    async def unlock_connector(self, evse_id: str, socket_id: int | None = None) -> None:
+        """
+        Unlock the connector of a charge point. Raises ``BlueCurrentException`` if it fails.
+
+        Portable (UMOVE) charge points are not supported and raise ``NotImplementedError``.
+
+        Args:
+            evse_id: The ID of the charge point.
+            socket_id: The socket to unlock. May be omitted for a single-socket charge point.
+        """
+        charge_point = next((cp for cp in await self.get_charge_points() if cp["evse_id"] == evse_id), None)
+        if charge_point is None:
+            raise ValueError(f"Unknown charge point {evse_id}.")
+        if charge_point["chargepoint_type"] == "UMOVE" and not charge_point["is_cable"]:
+            # Portable charge points unlock through a separate websocket command instead.
+            raise NotImplementedError("Unlocking a portable (UMOVE) charge point is not supported.")
+        socket_id = self._resolve_socket_id(evse_id, charge_point["socket_ids"], socket_id)
+        # Fire-and-forget, exactly as the app does it: the flow_id is the literal string "flow" and
+        # no confirmation push is awaited — an HTTP success is the success signal.
+        await self._post_action("unlockconnector", dict(chargepoint_id=evse_id, socket_id=socket_id, flow_id="flow"))
 
     async def soft_reset(self, evse_id: str) -> None:
         """Soft-reset a charge point. Raises ``BlueCurrentException`` if it fails."""
         flow_id = str(uuid4())
         async with self._command("SOFT_RESET"):
             await self._await_connected()
-            await self._send(dict(command="SOFT_RESET", evse_id=evse_id, flow_id=flow_id), token=True)
-            await self._receive("RECEIVED_SOFT_RESET", flow_id=flow_id)
-            status = await self._receive("STATUS_SOFT_RESET", timeout=self.command_timeout, flow_id=flow_id)
+            # One subscription for both confirmations, so neither is missed between separate queues.
+            with self.queue.queue() as q:
+                await self._send(dict(command="SOFT_RESET", evse_id=evse_id, flow_id=flow_id), token=True)
+                await self._receive_from(q, "RECEIVED_SOFT_RESET", flow_id=flow_id)
+                status = await self._receive_from(q, "STATUS_SOFT_RESET", timeout=self.command_timeout, flow_id=flow_id)
+            if not status.get("success"):
+                raise BlueCurrentException(status)
+
+    async def reboot(self, evse_id: str) -> None:
+        """Reboot a charge point. Raises ``BlueCurrentException`` if it fails.
+
+        A full reboot of the charge point, as opposed to the software reset of soft_reset.
+        """
+        flow_id = str(uuid4())
+        async with self._command("REBOOT"):
+            await self._await_connected()
+            # One subscription for both confirmations, so neither is missed between separate queues.
+            with self.queue.queue() as q:
+                await self._send(dict(command="REBOOT", evse_id=evse_id, flow_id=flow_id), token=True)
+                await self._receive_from(q, "RECEIVED_REBOOT", flow_id=flow_id)
+                status = await self._receive_from(q, "STATUS_REBOOT", timeout=self.command_timeout, flow_id=flow_id)
             if not status.get("success"):
                 raise BlueCurrentException(status)
 
@@ -669,19 +712,22 @@ class BlueCurrentClient:
                 omitted for a multi-socket charge point, or if no sockets are reported at all.
         """
         statuses = await self.get_charge_point_statuses(evse_id)
+        socket_id = self._resolve_socket_id(evse_id, [status["socket_id"] for status in statuses], socket_id)
+        return next(status for status in statuses if status["socket_id"] == socket_id)
+
+    @staticmethod
+    def _resolve_socket_id(evse_id: str, sockets: list[int], socket_id: int | None) -> int:
+        """Pick the socket to address: the only one when socket_id is omitted, else the given one."""
         if socket_id is None:
             # Socket numbering is the backend's business: don't assume the only socket is number 1.
-            if len(statuses) == 1:
-                return statuses[0]
-            if not statuses:
+            if len(sockets) == 1:
+                return sockets[0]
+            if not sockets:
                 raise ValueError(f"Charge point {evse_id} reports no sockets.")
-            sockets = sorted(status["socket_id"] for status in statuses)
-            raise ValueError(f"Charge point {evse_id} has sockets {sockets}; specify which one with socket_id.")
-        for status in statuses:
-            if status["socket_id"] == socket_id:
-                return status
-        sockets = sorted(status["socket_id"] for status in statuses)
-        raise ValueError(f"Charge point {evse_id} has sockets {sockets}; no socket {socket_id}.")
+            raise ValueError(f"Charge point {evse_id} has sockets {sorted(sockets)}; specify which one with socket_id.")
+        if socket_id not in sockets:
+            raise ValueError(f"Charge point {evse_id} has sockets {sorted(sockets)}; no socket {socket_id}.")
+        return socket_id
 
     async def set_delayed_charging(self, evse_id: str, enabled: bool) -> None:
         """
@@ -1042,35 +1088,43 @@ class BlueCurrentClient:
         return f"pybluecurrent {__version__.split('+')[0]}"
 
     async def _receive(self, obj: str, timeout: int = 10, flow_id: str | None = None) -> dict[str, Any]:
+        with self.queue.queue() as q:
+            return await self._receive_from(q, obj, timeout=timeout, flow_id=flow_id)
+
+    async def _receive_from(self, q: Queue, obj: str, timeout: int = 10, flow_id: str | None = None) -> dict[str, Any]:
+        # Split from _receive so a caller can subscribe to the broadcast queue before triggering the
+        # frame it waits for (e.g. over REST) — the queue only delivers to live subscribers.
         terminal = self._closed or self._drop_reason
         if terminal is not None:
             raise terminal  # dead client or dropped connection: fail rather than block for a reply
         loop = get_running_loop()
         deadline = loop.time() + timeout
-        with self.queue.queue() as q:
-            while True:
-                # One deadline for the whole call, so a stream of non-matching frames can't re-arm it.
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise RequestTimeout(f"No {obj} received within {timeout}s.")
-                try:
-                    message = await wait_for(q.get(), timeout=remaining)
-                except AsyncTimeoutError as exc:
-                    # RequestTimeout subclasses TimeoutError so ``except TimeoutError`` still works
-                    # (and normalises py3.10, where asyncio.TimeoutError is a distinct class).
-                    raise RequestTimeout(f"No {obj} received within {timeout}s.") from exc
-                if message is _CONNECTION_CLOSED:
-                    # Identity check before .get(): the sentinel is not a dict.
-                    raise self._closed or self._drop_reason or ConnectionLost("The websocket connection was closed.")
-                if message.get("object") == "ERROR":
-                    # Route errors by flow_id so a correlated one doesn't poison other calls; an
-                    # uncorrelated error (no flow_id, e.g. "forbidden") still raises for the waiter.
-                    error_flow_id = message.get("flow_id")
-                    if error_flow_id in (flow_id, None):
-                        raise BlueCurrentException(message)
-                    continue
-                if message.get("object") == obj:
-                    return message
+        while True:
+            # One deadline for the whole call, so a stream of non-matching frames can't re-arm it.
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise RequestTimeout(f"No {obj} received within {timeout}s.")
+            try:
+                message = await wait_for(q.get(), timeout=remaining)
+            except AsyncTimeoutError as exc:
+                # RequestTimeout subclasses TimeoutError so ``except TimeoutError`` still works
+                # (and normalises py3.10, where asyncio.TimeoutError is a distinct class).
+                raise RequestTimeout(f"No {obj} received within {timeout}s.") from exc
+            if message is _CONNECTION_CLOSED:
+                # Identity check before .get(): the sentinel is not a dict.
+                raise self._closed or self._drop_reason or ConnectionLost("The websocket connection was closed.")
+            if message.get("object") == "ERROR":
+                # Route errors by flow_id so a correlated one doesn't poison other calls; an
+                # uncorrelated error (no flow_id, e.g. "forbidden") still raises for the waiter.
+                error_flow_id = message.get("flow_id")
+                if error_flow_id in (flow_id, None):
+                    raise BlueCurrentException(message)
+                continue
+            if message.get("object") == obj:
+                message_flow_id = message.get("flow_id")
+                if flow_id is not None and message_flow_id is not None and message_flow_id != flow_id:
+                    continue  # another call's confirmation for the same object
+                return message
 
     async def _send(self, data: dict[str, Any], token: bool = False):
         terminal = self._closed or self._drop_reason
@@ -1120,3 +1174,33 @@ class BlueCurrentClient:
         if result.get("success") is False:
             raise BlueCurrentException(result)
         return result
+
+    async def _post_action(self, action: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Post a charge-point action to the bce API.
+
+        Any failure — an HTTP error (with the JSON body attached when there is one) or a
+        {"success": false} response — is raised as a BlueCurrentException.
+        """
+        if self.httpx_client is None:
+            raise RuntimeError(f"{self.__class__.__name__} is not connected.")
+        response = await self.httpx_client.post(
+            f"{self.bce_api_url}/chargepoints/actions/{action}",
+            # The bce API authenticates with the bare session token, without the "Token " prefix
+            # the bc API expects.
+            headers={"Authorization": f"{self.token}", "User-Agent": self._user_agent},
+            json=body,
+        )
+        if not response.is_success:
+            if response.headers.get("content-type", "").startswith("application/json"):
+                raise BlueCurrentException(response.json())
+            try:
+                response.raise_for_status()
+            except HTTPStatusError as exc:
+                raise BlueCurrentException(str(exc)) from exc
+        try:
+            result = response.json()
+        except JSONDecodeError:
+            return {}  # like the app, treat any HTTP success as success
+        if isinstance(result, dict) and result.get("success") is False:
+            raise BlueCurrentException(result)
+        return result if isinstance(result, dict) else {}
