@@ -611,9 +611,11 @@ class BlueCurrentClient:
         flow_id = str(uuid4())
         async with self._command("SOFT_RESET"):
             await self._await_connected()
-            await self._send(dict(command="SOFT_RESET", evse_id=evse_id, flow_id=flow_id), token=True)
-            await self._receive("RECEIVED_SOFT_RESET", flow_id=flow_id)
-            status = await self._receive("STATUS_SOFT_RESET", timeout=self.command_timeout, flow_id=flow_id)
+            # One subscription for both confirmations, so neither is missed between separate queues.
+            with self.queue.queue() as q:
+                await self._send(dict(command="SOFT_RESET", evse_id=evse_id, flow_id=flow_id), token=True)
+                await self._receive_from(q, "RECEIVED_SOFT_RESET", flow_id=flow_id)
+                status = await self._receive_from(q, "STATUS_SOFT_RESET", timeout=self.command_timeout, flow_id=flow_id)
             if not status.get("success"):
                 raise BlueCurrentException(status)
 
@@ -625,9 +627,11 @@ class BlueCurrentClient:
         flow_id = str(uuid4())
         async with self._command("REBOOT"):
             await self._await_connected()
-            await self._send(dict(command="REBOOT", evse_id=evse_id, flow_id=flow_id), token=True)
-            await self._receive("RECEIVED_REBOOT", flow_id=flow_id)
-            status = await self._receive("STATUS_REBOOT", timeout=self.command_timeout, flow_id=flow_id)
+            # One subscription for both confirmations, so neither is missed between separate queues.
+            with self.queue.queue() as q:
+                await self._send(dict(command="REBOOT", evse_id=evse_id, flow_id=flow_id), token=True)
+                await self._receive_from(q, "RECEIVED_REBOOT", flow_id=flow_id)
+                status = await self._receive_from(q, "STATUS_REBOOT", timeout=self.command_timeout, flow_id=flow_id)
             if not status.get("success"):
                 raise BlueCurrentException(status)
 
