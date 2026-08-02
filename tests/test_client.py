@@ -1,3 +1,4 @@
+from asyncio import sleep
 from datetime import date, time
 from os import environ
 
@@ -242,6 +243,32 @@ class TestDelayedCharging:
         with raises(BlueCurrentException) as e:
             await connected_client.set_delayed_charging("BCU123456", enabled=True)
         assert e.value.args[0]["message"] == "forbidden"
+
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
+    @mark.skipif(environ.get("BLUECURRENT_ALLOW_BOOST", "FALSE") != "TRUE", reason="Boost test not explicitly enabled.")
+    async def test_boost(self, connected_client: BlueCurrentClient, evse_id: str, socket_id: int):
+        # A boost cannot be undone: it overrides the profile for the ongoing session. So unlike the
+        # other read-write tests, this one cannot create its own precondition and restore afterward;
+        # instead it only runs when there is a session actually being held back by delayed charging.
+        settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+        if settings["delayed_charging"]["permission"] != "write":
+            skip(reason="No permission to override delayed charging.")
+        if not settings["delayed_charging"]["value"]:
+            skip(reason="Delayed charging is not enabled.")
+        status = await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id)
+        if status["boosting"]:
+            skip(reason="A boost is already active.")
+        if status["vehicle_status"] != "B":
+            skip(reason="No session is waiting for the delayed charging window.")
+
+        await connected_client.boost(evse_id)
+
+        for _ in range(5):
+            status = await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id)
+            if status["boosting"]:
+                break
+            await sleep(2)  # The status may lag the override slightly.
+        assert status["boosting"] is True
 
 
 class TestPriceBasedCharging:

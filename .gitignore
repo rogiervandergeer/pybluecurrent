@@ -136,3 +136,6 @@ dmypy.json
 
 # Setuptools SCM version
 _version.py
+
+# JetBrains IDEs
+.idea/
