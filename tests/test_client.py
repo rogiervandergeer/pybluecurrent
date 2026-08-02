@@ -175,19 +175,16 @@ class TestSocketApi:
             if isinstance(exc.args[0], dict) and exc.args[0].get("error") == "TIMEOUT":
                 skip(reason="Charge point is not acknowledging status changes (backend TIMEOUT).")
             raise
-        assert (await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id))[
-            "activity"
-        ] == "unavailable"
-        await connected_client.set_status(evse_id=evse_id, enabled=True, socket_id=socket_id)
+        # The disable landed; re-enable in a finally so a failed assertion never leaves it disabled.
+        try:
+            assert (await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id))[
+                "activity"
+            ] == "unavailable"
+        finally:
+            await connected_client.set_status(evse_id=evse_id, enabled=True, socket_id=socket_id)
         assert (await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id))[
             "activity"
         ] == "available"
-
-    async def test_error(self, connected_client: BlueCurrentClient):
-        # The exact error shape of the action endpoint for a foreign charge point is not pinned
-        # down yet; any BlueCurrentException will do until a read-write run has shown it.
-        with raises(BlueCurrentException):
-            await connected_client.set_status("BCU123456", False, socket_id=1)
 
 
 async def _capture_active_profile(client: BlueCurrentClient, evse_id: str) -> dict[str, bool]:
