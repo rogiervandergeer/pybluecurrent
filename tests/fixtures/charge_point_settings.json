@@ -1,5 +1,10 @@
 {
   "data": {
+    "capacity_tariff": {
+      "capacitytariffmaxkwh": 4.0,
+      "permission": "write",
+      "value": true
+    },
     "chargepoint_name": "",
     "chargepoint_type": "HIDDEN",
     "default_card": {

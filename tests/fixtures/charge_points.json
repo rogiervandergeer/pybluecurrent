@@ -2,6 +2,11 @@
   "data": [
     {
       "activity": "available",
+      "capacity_tariff": {
+        "capacitytariffmaxkwh": null,
+        "permission": "none",
+        "value": false
+      },
       "chargepoint_type": "HIDDEN",
       "default_card": {
         "customer_name": "Your Name",

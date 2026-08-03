@@ -58,6 +58,8 @@ def _normalize_charge_point(data: dict[str, Any]) -> None:
 
     - Rewrite the smart-charging profile read keys to the canonical setter names (``days``,
       ``expected_departure_time``), since the backend reads them back under different keys.
+    - Rewrite the capacity-tariff read key (``capacitytariffmaxkwh``) to the canonical setter
+      name ``max_kwh``.
     - Surface the plug-and-charge card as ``None`` when none is configured, rather than the
       backend's no-card sentinel card object.
     """
@@ -72,6 +74,9 @@ def _normalize_charge_point(data: dict[str, Any]) -> None:
         rename_key(price_based, "expected_leave_time", "expected_departure_time")
         if isinstance(price_based.get("expected_departure_time"), str):
             price_based["expected_departure_time"] = parse_time(price_based["expected_departure_time"])
+    capacity_tariff = data.get("capacity_tariff")
+    if isinstance(capacity_tariff, dict):
+        rename_key(capacity_tariff, "capacitytariffmaxkwh", "max_kwh")
     card = data.get("plug_and_charge_charge_card")
     if isinstance(card, dict) and card.get("uid") == _NO_CARD_UID:
         data["plug_and_charge_charge_card"] = None
@@ -451,7 +456,8 @@ class BlueCurrentClient:
                              "zipcode": "3526KS", "city": "Utrecht", "country": "NL"},
                 "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00",
                                      "end_time": "07:00", "days": [1, 2, 3, 4, 5]},
-                "price_based_charging": {"value": False, "permission": "write"}
+                "price_based_charging": {"value": False, "permission": "write"},
+                "capacity_tariff": {"value": False, "permission": "none"}
             }
         """
         data = (await self._request(dict(command="GET_CHARGE_POINTS"), "CHARGE_POINTS"))["data"]
@@ -491,7 +497,8 @@ class BlueCurrentClient:
                 "delayed_charging": {"value": False, "permission": "write", "start_time": "23:00",
                                      "end_time": "07:00", "days": [1, 2, 3, 4, 5]},
                 "price_based_charging": {"value": True, "permission": "write", "expected_departure_time": "07:00",
-                                         "expected_kwh": 25, "minimum_kwh": 10}
+                                         "expected_kwh": 25, "minimum_kwh": 10},
+                "capacity_tariff": {"value": True, "permission": "write", "max_kwh": 4.0}
             }
         """
         data = (await self._request(dict(command="GET_CH_SETTINGS", evse_id=evse_id), "CH_SETTINGS"))["data"]
@@ -823,6 +830,35 @@ class BlueCurrentClient:
                 minimum_kwh=minimum_kwh,
             ),
         )
+
+    async def set_capacity_tariff(self, evse_id: str, enabled: bool, max_kwh: float | None = None) -> None:
+        """
+        Enable, update or disable the capacity-tariff setting of a charge point.
+
+        The setting is an on/off toggle with a maximum energy value in kWh, applied by the
+        backend. The configured state is read back from the ``capacity_tariff`` field of the
+        charge point settings, where the value appears as ``max_kwh``.
+
+        Args:
+            evse_id: A charge point ID.
+            enabled: Boolean that indicates whether the capacity tariff should be enabled.
+            max_kwh: The maximum energy value in kWh, from 0.01 to 80 inclusive. Required
+                when enabling; must be omitted when disabling.
+
+        Raises:
+            ValueError: If max_kwh is missing when enabling, given when disabling, or outside
+                the accepted range.
+        """
+        if enabled:
+            if max_kwh is None:
+                raise ValueError("max_kwh is required when enabling the capacity tariff.")
+            if not 0.01 <= max_kwh <= 80:
+                raise ValueError("max_kwh must be between 0.01 and 80 inclusive.")
+            await self._post("setcapacitytariff", dict(evse_id=evse_id, value=True, capacitytariffmaxkwh=max_kwh))
+        else:
+            if max_kwh is not None:
+                raise ValueError("max_kwh cannot be given when disabling the capacity tariff.")
+            await self._post("setcapacitytariff", dict(evse_id=evse_id, value=False))
 
     async def boost(self, evse_id: str) -> None:
         """
