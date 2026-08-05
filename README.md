@@ -96,7 +96,7 @@ Every method is a coroutine on `BlueCurrentClient`; call them inside the async c
 - **Account & authentication** — [`get_account`](#get_account), [`get_api_token`](#get_api_token), [`generate_api_token`](#generate_api_token), [`get_contracts`](#get_contracts)
 - **Charge points & cards** — [`get_charge_points`](#get_charge_points), [`get_charge_point_settings`](#get_charge_point_settings), [`get_charge_point_status`](#get_charge_point_status), [`get_charge_point_statuses`](#get_charge_point_statuses), [`get_charge_cards`](#get_charge_cards)
 - **Grid & sustainability** — [`get_grid_status`](#get_grid_status), [`get_grids`](#get_grids), [`get_sustainability_status`](#get_sustainability_status)
-- **Settings & control** — [`set_plug_and_charge_charge_card`](#set_plug_and_charge_charge_card), [`set_status`](#set_status), [`unlock_connector`](#unlock_connector), [`soft_reset`](#soft_reset), [`reboot`](#reboot)
+- **Settings & control** — [`set_plug_and_charge_charge_card`](#set_plug_and_charge_charge_card), [`set_status`](#set_status), [`set_capacity_tariff`](#set_capacity_tariff), [`unlock_connector`](#unlock_connector), [`soft_reset`](#soft_reset), [`reboot`](#reboot)
 - **Smart charging** — [`set_delayed_charging`](#set_delayed_charging), [`set_delayed_charging_schedule`](#set_delayed_charging_schedule), [`set_price_based_charging`](#set_price_based_charging), [`set_price_based_charging_settings`](#set_price_based_charging_settings), [`boost`](#boost)
 - **Transactions** — [`get_transactions`](#get_transactions), [`iterate_transactions`](#iterate_transactions)
 
@@ -116,8 +116,8 @@ from pybluecurrent.models import ChargePoint, Transaction
 notes live there. The response types are `Account`, `ChargeCard`, `ChargePoint`,
 `ChargePointSettings`, `ChargePointStatus`, `GridStatus`, `Grid`, `SustainabilityStatus`,
 `Contract`, `TransactionsPage` and `Transaction`, built from the nested shapes `Tariff`,
-`Location`, `Address`, `DelayedCharging`, `PriceBasedCharging`, `CardRef`, `BoolSetting` and
-`IntSetting`. Dates and times are parsed for you: `date`/`datetime` fields are Python objects, and
+`Location`, `Address`, `DelayedCharging`, `PriceBasedCharging`, `CapacityTariff`, `CardRef`,
+`BoolSetting` and `IntSetting`. Dates and times are parsed for you: `date`/`datetime` fields are Python objects, and
 schedule times (`start_time`, `end_time`, `expected_departure_time`) are `datetime.time`.
 
 ### Account & authentication
@@ -316,6 +316,23 @@ Reboots a charge point — a full reboot, as opposed to the software reset of
 
 **Arguments**
 - `evse_id`: The ID of the charge point.
+
+#### set_capacity_tariff
+
+```python
+async def set_capacity_tariff(self, evse_id: str, enabled: bool, max_kwh: float | None = None) -> None
+```
+
+Enables, updates or disables the capacity-tariff setting of a charge point: an on/off toggle
+with a maximum energy value in kWh, applied by the backend. The configured state is read back
+from the `capacity_tariff` field of the charge point settings, where the value appears as
+`max_kwh`.
+
+**Arguments**
+- `evse_id`: The ID of the charge point.
+- `enabled`: Whether the capacity tariff should be enabled.
+- `max_kwh`: The maximum energy value in kWh, from `0.01` to `80` inclusive. Required when
+  enabling; must be omitted when disabling.
 
 ### Smart charging
 

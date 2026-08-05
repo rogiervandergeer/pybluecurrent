@@ -16,7 +16,7 @@ from fake_socket import (
     make_reconnecting_connect,
 )
 from models_check import assert_model
-from pytest import MonkeyPatch, raises
+from pytest import MonkeyPatch, mark, raises
 
 from pybluecurrent import BlueCurrentClient, Weekday
 from pybluecurrent.client import _redact
@@ -160,6 +160,8 @@ class TestOfflineCommands:
         assert charge_points[0]["evse_id"] == "BCU123456"
         assert charge_points[0]["socket_ids"] == [1]
         assert charge_points[0]["plug_and_charge_charge_card"]["uid"] == "A1B2C3D4E5F6"
+        # The capacity-tariff kWh key is normalized, and may be null while never configured.
+        assert charge_points[0]["capacity_tariff"]["max_kwh"] is None
 
     async def test_get_grid_status(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_GRID_STATUS", load_fixture("grid_status"))
@@ -179,6 +181,9 @@ class TestOfflineCommands:
         assert settings["delayed_charging"]["days"] == [1, 2, 3, 4, 5]
         assert settings["delayed_charging"]["start_time"] == time(23, 0)
         assert settings["delayed_charging"]["end_time"] == time(7, 0)
+        # The capacity-tariff kWh read key (capacitytariffmaxkwh) is normalized to max_kwh.
+        assert settings["capacity_tariff"]["max_kwh"] == 4.0
+        assert "capacitytariffmaxkwh" not in settings["capacity_tariff"]
 
     async def test_get_charge_cards(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("GET_CHARGE_CARDS", load_fixture("charge_cards"))
@@ -674,6 +679,58 @@ class TestOfflinePriceBasedCharging:
         with raises(BlueCurrentException) as exc:
             await offline_client.set_price_based_charging_settings("BCU123456", time(7, 0), 25, 10)
         assert exc.value.args[0]["error"] == "invalid settings"
+
+
+class TestOfflineCapacityTariff:
+    """The capacity tariff, which is sent over REST rather than over the websocket."""
+
+    async def test_enable(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        await offline_client.set_capacity_tariff("BCU123456", enabled=True, max_kwh=5.5)
+        assert fake_rest.last_path == "setcapacitytariff"
+        assert fake_rest.last_body == {"evse_id": "BCU123456", "value": True, "capacitytariffmaxkwh": 5.5}
+
+    async def test_disable_omits_max_kwh(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        await offline_client.set_capacity_tariff("BCU123456", enabled=False)
+        assert fake_rest.last_path == "setcapacitytariff"
+        assert fake_rest.last_body == {"evse_id": "BCU123456", "value": False}
+
+    @mark.parametrize("max_kwh", [0.01, 80])
+    async def test_boundary_values_are_accepted(
+        self, offline_client: BlueCurrentClient, fake_rest: FakeRest, max_kwh: float
+    ):
+        await offline_client.set_capacity_tariff("BCU123456", enabled=True, max_kwh=max_kwh)
+        assert fake_rest.last_body["capacitytariffmaxkwh"] == max_kwh
+
+    async def test_enable_requires_max_kwh(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        with raises(ValueError):
+            await offline_client.set_capacity_tariff("BCU123456", enabled=True)
+        # Nothing is sent when the value is missing.
+        assert fake_rest.requests == []
+
+    @mark.parametrize("max_kwh", [-1, 0, 0.009, 80.01])
+    async def test_out_of_range_max_kwh_raises(
+        self, offline_client: BlueCurrentClient, fake_rest: FakeRest, max_kwh: float
+    ):
+        with raises(ValueError):
+            await offline_client.set_capacity_tariff("BCU123456", enabled=True, max_kwh=max_kwh)
+        assert fake_rest.requests == []
+
+    async def test_disable_rejects_max_kwh(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        with raises(ValueError):
+            await offline_client.set_capacity_tariff("BCU123456", enabled=False, max_kwh=5.5)
+        assert fake_rest.requests == []
+
+    async def test_rejection_is_raised(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("setcapacitytariff", {"object": "ERROR", "error": 2, "message": "forbidden"}, status_code=401)
+        with raises(BlueCurrentException) as exc:
+            await offline_client.set_capacity_tariff("BCU123456", enabled=True, max_kwh=5.5)
+        assert exc.value.args[0]["message"] == "forbidden"
+
+    async def test_failure_is_raised(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("setcapacitytariff", {"success": False, "error": "invalid value"})
+        with raises(BlueCurrentException) as exc:
+            await offline_client.set_capacity_tariff("BCU123456", enabled=False)
+        assert exc.value.args[0]["error"] == "invalid value"
 
 
 class TestOfflineLifecycle:

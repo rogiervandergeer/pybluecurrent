@@ -54,6 +54,17 @@ class PriceBasedCharging(BoolSetting, total=False):
     minimum_kwh: float
 
 
+class CapacityTariff(BoolSetting, total=False):
+    """The capacity-tariff setting: an on/off toggle with a maximum energy value in kWh.
+
+    ``max_kwh`` matches ``set_capacity_tariff(max_kwh=...)``; the backend's own read key
+    (``capacitytariffmaxkwh``) is normalized to it before you see it. It may be ``None`` or
+    absent while the setting has never been configured.
+    """
+
+    max_kwh: float | None
+
+
 class _CardBase(TypedDict):
     uid: str
     id: str
@@ -162,7 +173,17 @@ class _ChargePointCards(TypedDict, total=False):
     plug_and_charge_charge_card: CardRef | None
 
 
-class ChargePoint(_ChargePointCommon, _ChargePointCards):
+class _ChargePointCapacityTariff(TypedDict, total=False):
+    """The optional capacity-tariff field, shared by a charge point and its settings.
+
+    Declared optional: it is confirmed on the settings response, but not on every response
+    describing a charge point.
+    """
+
+    capacity_tariff: CapacityTariff
+
+
+class ChargePoint(_ChargePointCommon, _ChargePointCards, _ChargePointCapacityTariff):
     """A charge point, as returned by ``get_charge_points``.
 
     A disabled smart-charging profile is still present, slimmed to its ``{value, permission}``
@@ -178,7 +199,7 @@ class ChargePoint(_ChargePointCommon, _ChargePointCards):
     socket_ids: list[int]  # the sockets this charge point has (one for most, two for dual-socket models)
 
 
-class ChargePointSettings(_ChargePointCommon, _ChargePointCards):
+class ChargePointSettings(_ChargePointCommon, _ChargePointCards, _ChargePointCapacityTariff):
     """The settings of a charge point, as returned by ``get_charge_point_settings``.
 
     A disabled smart-charging profile is still present, slimmed to its ``{value, permission}``

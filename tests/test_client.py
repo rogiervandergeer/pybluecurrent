@@ -362,6 +362,48 @@ class TestPriceBasedCharging:
         assert e.value.args[0]["message"] == "forbidden"
 
 
+class TestCapacityTariff:
+    async def test_capacity_tariff_in_settings(self, connected_client: BlueCurrentClient, evse_id: str):
+        settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+        capacity_tariff = settings["capacity_tariff"]
+        assert isinstance(capacity_tariff["value"], bool)
+        assert capacity_tariff["permission"] in ("none", "read", "write")
+        assert capacity_tariff.get("max_kwh") is None or isinstance(capacity_tariff["max_kwh"], (int, float))
+        # The backend's read key is normalized to max_kwh.
+        assert "capacitytariffmaxkwh" not in capacity_tariff
+
+    @mark.skipif(environ.get("BLUECURRENT_READ_ONLY", "TRUE") != "FALSE", reason="Running read-only tests.")
+    async def test_set_capacity_tariff(self, connected_client: BlueCurrentClient, evse_id: str, socket_id: int):
+        settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
+        before = settings["capacity_tariff"]
+        if before["permission"] != "write":
+            skip(reason="No permission to change the capacity tariff.")
+        status = await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id)
+        if status["activity"] == "charging":
+            # The setting cannot be changed during a charging session.
+            skip(reason="Do not interrupt an ongoing charging session.")
+
+        try:
+            await connected_client.set_capacity_tariff(evse_id=evse_id, enabled=True, max_kwh=1.23)
+            after = (await connected_client.get_charge_point_settings(evse_id=evse_id))["capacity_tariff"]
+            assert after["value"] is True
+            assert after["max_kwh"] == 1.23
+            await connected_client.set_capacity_tariff(evse_id=evse_id, enabled=False)
+            after = (await connected_client.get_charge_point_settings(evse_id=evse_id))["capacity_tariff"]
+            assert after["value"] is False
+        finally:
+            # Re-enabling requires a value, so only restore the enabled state when one was captured.
+            if before["value"] and before.get("max_kwh") is not None:
+                await connected_client.set_capacity_tariff(evse_id=evse_id, enabled=True, max_kwh=before["max_kwh"])
+            else:
+                await connected_client.set_capacity_tariff(evse_id=evse_id, enabled=False)
+
+    async def test_set_capacity_tariff_of_other_charge_point(self, connected_client: BlueCurrentClient):
+        with raises(BlueCurrentException) as e:
+            await connected_client.set_capacity_tariff("BCU123456", enabled=True, max_kwh=1)
+        assert e.value.args[0]["message"] == "forbidden"
+
+
 class TestRestApi:
     async def test_get_contracts(self, connected_client: BlueCurrentClient):
         contracts = await connected_client.get_contracts()
