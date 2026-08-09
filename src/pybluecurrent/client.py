@@ -525,10 +525,6 @@ class BlueCurrentClient:
         """
         return (await self._request(dict(command="GET_GRID_STATUS", evse_id=evse_id), "GRID_STATUS"))["data"]
 
-    async def get_sessions(self, evse_id: str):
-        """Does not work"""
-        return await self._request(dict(command="GET_SESSIONS"), "SESSIONS")
-
     async def get_sustainability_status(self) -> SustainabilityStatus:
         """
         Get statistics on the sustainability of all your charge points.
