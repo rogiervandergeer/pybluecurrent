@@ -87,11 +87,6 @@ class TestSocketApi:
         assert_model(settings, ChargePointSettings)
         assert settings["evse_id"] == evse_id
 
-    @mark.skip("Does not work")
-    async def test_get_sessions(self, connected_client: BlueCurrentClient, evse_id: str):
-        sessions = await connected_client.get_sessions(evse_id=evse_id)
-        print(sessions)
-
     async def test_get_sustainability_status(self, connected_client: BlueCurrentClient):
         sessions = await connected_client.get_sustainability_status()
         assert_model(sessions, SustainabilityStatus)
