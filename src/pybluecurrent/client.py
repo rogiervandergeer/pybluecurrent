@@ -42,11 +42,23 @@ from pybluecurrent.utilities import (
     format_time,
     parse_datetime_keys,
     parse_list_datetime_keys,
+    parse_number_keys,
     parse_time,
     rename_key,
 )
 
 logger = getLogger(__name__)
+
+# The numeric fields of a Transaction, with the type get_transactions returns them as.
+_TRANSACTION_NUMBER_TYPES: dict[str, type[int] | type[float]] = {
+    "transaction_id": int,
+    "socket_id": int,
+    "kwh": float,
+    "total_costs": float,
+    "total_costs_ex_vat": float,
+    "reimbursement_tariff_ex_vat": float,
+    "vat": int,
+}
 
 
 # The plug-and-charge card reads back with this sentinel uid when no card is configured ("home use").
@@ -995,6 +1007,9 @@ class BlueCurrentClient:
             result["transactions"],
             formats={"started_at": ("%d-%m-%Y %H:%M:%S", False), "end_time": ("%d-%m-%Y %H:%M:%S", False)},
         )
+        # The API may return these as (space-padded) strings rather than numbers.
+        for transaction in result["transactions"]:
+            parse_number_keys(transaction, _TRANSACTION_NUMBER_TYPES)
         return result
 
     async def iterate_transactions(
