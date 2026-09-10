@@ -25,6 +25,7 @@ This project is pre-1.0: breaking changes may land in minor releases.
 
 ### Fixed
 
+- `get_transactions()` and `iterate_transactions()` return numbers again. The API now sends `socket_id` and the cost fields (`total_costs`, `total_costs_ex_vat`, `reimbursement_tariff_ex_vat`) as strings, which are now parsed back to an `int` and `float`s; numbers sent as numbers still work. `evse_name` and `card_name` may be `None`, as the API now returns for some transactions.
 - `unlock_connector()` now works: it posts to the REST endpoint the BlueCurrent apps use, where the websocket command it used to send is only implemented for portable (UMOVE) charge points — for which it now raises `NotImplementedError` instead. It gains an optional `socket_id` argument, and raises `ValueError` for an unknown charge point (previously the backend rejected it as forbidden).
 
 ## [0.3.0] - 2026-07-25

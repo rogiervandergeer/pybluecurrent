@@ -2,7 +2,7 @@ from datetime import date, datetime
 
 from pytest import raises
 
-from pybluecurrent.utilities import parse_datetime_keys, parse_list_datetime_keys
+from pybluecurrent.utilities import parse_datetime_keys, parse_list_datetime_keys, parse_number_keys
 
 
 class TestParseDateTimeKeys:
@@ -51,3 +51,25 @@ class TestParseListDateTimeKeys:
             {"b": date(2023, 6, 27)},
             {"a": datetime(2023, 7, 24, 15, 25, 33)},
         ]
+
+
+class TestParseNumberKeys:
+    def test_strings(self):
+        source = {"a": "1", "b": "   5.97", "c": "x"}
+        result = parse_number_keys(source, types={"a": int, "b": float})
+        assert result == {"a": 1, "b": 5.97, "c": "x"}
+        assert isinstance(result["a"], int)
+
+    def test_numbers_and_none_unchanged(self):
+        source = {"a": 1, "b": 4.93, "c": None}
+        assert parse_number_keys(source, types={"a": int, "b": float, "c": float}) == {"a": 1, "b": 4.93, "c": None}
+
+    def test_missing_in_source(self):
+        assert parse_number_keys({}, types={"a": int}) == {}
+
+    def test_blank_string(self):
+        assert parse_number_keys({"a": "  "}, types={"a": float}) == {"a": None}
+
+    def test_not_a_number(self):
+        with raises(ValueError):
+            parse_number_keys({"a": "5,97"}, types={"a": float})

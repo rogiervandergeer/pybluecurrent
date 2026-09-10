@@ -68,6 +68,31 @@ def _parse_datetime(value: str, datetime_format: str | tuple[str, ...]) -> datet
     raise ValueError(f"time data {value!r} does not match any of {candidates!r}")
 
 
+def parse_number_keys(source: dict[str, Any], types: dict[str, type[int] | type[float]]) -> dict[str, Any]:
+    """
+    Parse numeric keys that the API returns as strings.
+
+    Args:
+        source: The dictionary to parse numbers in.
+        types: A dictionary mapping each key to the type to parse it to (int or float).
+
+    Returns:
+        The source dictionary, where string values of the listed keys have been parsed.
+        Surrounding whitespace is ignored, and blank strings become None. Values that are
+        already numbers (or None) are left as they are.
+
+    For example, with
+    source = {"a": "1", "b": "   5.97", "c": 4.93}
+    types = {"a": int, "b": float, "c": float}
+    the result is {"a": 1, "b": 5.97, "c": 4.93}
+    """
+    for key, number_type in types.items():
+        value = source.get(key)
+        if isinstance(value, str):
+            source[key] = number_type(value) if value.strip() else None
+    return source
+
+
 def rename_key(source: dict[str, Any], old: str, new: str) -> None:
     """Rename a key in place if present, leaving the dict untouched when old is absent."""
     if old in source:

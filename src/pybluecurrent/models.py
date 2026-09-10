@@ -275,12 +275,12 @@ class _TransactionBase(TypedDict):
     chargepoint_id: str
     socket_id: int
     chargepoint_type: str
-    evse_name: str
+    evse_name: str | None
     started_at: datetime | None
     end_time: datetime | None
     kwh: float
     card_id: str
-    card_name: str
+    card_name: str | None
     total_costs: float
     total_costs_ex_vat: float
     reimbursement_tariff_ex_vat: float
@@ -294,6 +294,8 @@ class Transaction(_TransactionBase, total=False):
     ``reason_no_settlement`` holds the reason a transaction was not settled, as a string. A
     normally settled transaction has no reason: the key is either absent or present as ``None`` —
     so treat both a missing key and ``None`` as "settled".
+
+    ``evse_name`` and ``card_name`` may be ``None``, for example for home-use transactions without a card.
     """
 
     reason_no_settlement: str | None

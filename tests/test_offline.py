@@ -30,6 +30,7 @@ from pybluecurrent.models import (
     ChargePointStatus,
     GridStatus,
     SustainabilityStatus,
+    TransactionsPage,
 )
 
 
@@ -264,6 +265,40 @@ class TestOfflineChargePointStatus:
         fake_rest.on("chargepointstatus", {"object": "CH_STATUS", "evse_id": "BCU123456", "items": []})
         with raises(ValueError):
             await offline_client.get_charge_point_status("BCU123456")
+
+
+class TestOfflineTransactions:
+    """The gettransactions endpoint: numbers are returned as numbers, whether the API sends numbers or strings."""
+
+    async def test_numbers(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        fake_rest.on("gettransactions", load_fixture("transactions"))
+        page = await offline_client.get_transactions("BCU123456")
+        assert_model(page, TransactionsPage)
+        transaction = page["transactions"][0]
+        assert transaction["started_at"] == datetime(2026, 7, 3, 10, 0, 0)
+        assert (transaction["socket_id"], transaction["total_costs"], transaction["vat"]) == (1, 2.42, 21)
+
+    async def test_numbers_as_strings(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
+        """The API has also been seen sending space-padded strings, and None for the names."""
+        fixture = load_fixture("transactions")
+        fixture["data"]["transactions"][0].update(
+            socket_id="1",
+            total_costs="    2.42",
+            total_costs_ex_vat="    2.00",
+            reimbursement_tariff_ex_vat="    0.40",
+            card_name=None,
+            evse_name=None,
+        )
+        fake_rest.on("gettransactions", fixture)
+        page = await offline_client.get_transactions("BCU123456")
+        assert_model(page, TransactionsPage)
+        transaction = page["transactions"][0]
+        assert transaction["socket_id"] == 1
+        assert transaction["total_costs"] == 2.42
+        assert transaction["total_costs_ex_vat"] == 2.0
+        assert transaction["reimbursement_tariff_ex_vat"] == 0.4
+        assert transaction["card_name"] is None
+        assert transaction["evse_name"] is None
 
 
 class TestOfflineTwoPhaseCommands:
