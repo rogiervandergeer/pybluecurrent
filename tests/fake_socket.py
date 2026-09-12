@@ -75,6 +75,15 @@ class FakeSocket:
         self.closed = True
         self._outbound.put_nowait(_DISCONNECT)
 
+    def fail(self, error: BaseException) -> None:
+        """Signal an unclean disconnect: the ``async for`` in ``_handler`` raises ``error``.
+
+        A real socket raises ``ConnectionClosedError`` when the connection drops without a proper
+        close handshake (for example close code 1006), rather than ending the iteration cleanly.
+        """
+        self.closed = True
+        self._outbound.put_nowait(error)
+
     def __aiter__(self) -> "FakeSocket":
         return self
 
@@ -82,6 +91,8 @@ class FakeSocket:
         frame = await self._outbound.get()
         if frame is _DISCONNECT:
             raise StopAsyncIteration
+        if isinstance(frame, BaseException):
+            raise frame
         return frame
 
     # -- client -> server -------------------------------------------------

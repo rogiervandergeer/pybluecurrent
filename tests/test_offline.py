@@ -1,9 +1,11 @@
 import logging
-from asyncio import CancelledError, create_task, gather, sleep
+from asyncio import CancelledError, Event, create_task, gather, sleep, wait_for
+from asyncio import TimeoutError as AsyncTimeoutError
 from contextlib import suppress
 from datetime import date, datetime, time
 from unittest.mock import ANY
 
+from asyncio_multisubscriber_queue import MultisubscriberQueue
 from fake_rest import FakeRest, make_fake_async_client
 from fake_socket import (
     FAKE_CUSTOMER_ID,
@@ -17,9 +19,10 @@ from fake_socket import (
 )
 from models_check import assert_model
 from pytest import MonkeyPatch, mark, raises
+from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from pybluecurrent import BlueCurrentClient, Weekday
-from pybluecurrent.client import _redact
+from pybluecurrent.client import _CONNECTION_CLOSED, _redact
 from pybluecurrent.client import logger as client_logger
 from pybluecurrent.exceptions import AuthenticationFailed, BlueCurrentException, ConnectionLost, RequestTimeout
 from pybluecurrent.models import (
@@ -138,15 +141,19 @@ class TestOfflineTransport:
         assert (await first)["value"] == 1
         assert (await second)["value"] == 1
 
-    async def test_non_json_frame_is_skipped(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
-        # A malformed frame is logged and skipped; the handler survives and still delivers later frames.
+    @mark.parametrize("frame", ["this is not json", "[1, 2]", "42"], ids=["non-json", "array", "scalar"])
+    async def test_malformed_frame_is_skipped(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, frame: str
+    ):
+        # A frame that is not JSON, or is JSON but not an object, is logged and skipped; the handler
+        # survives, the waiting call is unharmed, and later frames still arrive.
         consumer = offline_client.consumer
         assert consumer is not None
         task = create_task(offline_client._receive("PONG"))
         await sleep(0)
-        fake_socket.feed("this is not json")
+        fake_socket.feed(frame)
         fake_socket.feed({"object": "PONG", "value": 1})
-        assert (await task)["value"] == 1
+        assert (await wait_for(task, 1))["value"] == 1
         assert not consumer.done()
 
 
@@ -858,10 +865,35 @@ def _validate_count(*sockets):
     return sum(m.get("command") == "VALIDATE_PASSWORD" for s in sockets for m in s.sent)
 
 
+class _RecordingQueue(MultisubscriberQueue):
+    """A broadcast queue noting, for each connection-closed sentinel, whether the client was closed yet.
+
+    A waiter only learns the final state from a sentinel sent *after* ``_closed`` is set; one sent
+    before it reads as a transient drop, after which the waiter blocks for good.
+    """
+
+    def __init__(self, client: BlueCurrentClient) -> None:
+        super().__init__()
+        self.client = client
+        self.closed_at_sentinel: list[bool] = []
+
+    async def put(self, data):
+        if data is _CONNECTION_CLOSED:
+            self.closed_at_sentinel.append(self.client._closed is not None)
+        await super().put(data)
+
+
 class TestReconnect:
     """The auto-reconnect supervisor (auto_reconnect=True), driven by a reconnecting fake transport."""
 
-    async def test_transparent_reconnect_reuses_token(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+    @mark.parametrize(
+        "drop",
+        [FakeSocket.close, lambda socket: socket.fail(ConnectionClosedError(None, None))],
+        # An unclean drop (no close handshake, close code 1006) ends the socket's iteration with an
+        # error instead of cleanly — which used to kill the supervisor, so nothing reconnected.
+        ids=["clean", "unclean"],
+    )
+    async def test_transparent_reconnect_reuses_token(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest, drop):
         first, second = FakeSocket(), FakeSocket()
         second.on("GET_GRID_STATUS", {"object": "GRID_STATUS", "data": {"id": "GRID-2"}})
         client, _ = _setup_reconnecting(
@@ -869,11 +901,12 @@ class TestReconnect:
         )
         async with client:
             token = client.token
-            first.close()
+            drop(first)
             await _wait_until(lambda: client.socket is second and client._connected.is_set())
             assert client.token == token  # reused the cached token — no re-login
             assert _validate_count(second) == 0
-            assert (await client.get_grid_status("A"))["id"] == "GRID-2"
+            assert (await wait_for(client.get_grid_status("A"), 1))["id"] == "GRID-2"
+        assert client.httpx_client is None  # and the teardown still ran to the end
 
     async def test_inflight_call_fails_then_client_recovers(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
         first, second = FakeSocket(), FakeSocket()
@@ -921,12 +954,21 @@ class TestReconnect:
             await _wait_until(lambda: client.socket is final and client._connected.is_set())
             assert delays == [1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
 
-    async def test_transport_failure_keeps_token(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+    @mark.parametrize(
+        "error",
+        [OSError(), InvalidHandshake("server rejected the handshake"), AsyncTimeoutError()],
+        # The handshake can also be refused (e.g. a 5xx during maintenance) or time out, which on
+        # Python 3.10 is a distinct asyncio.TimeoutError.
+        ids=["socket", "handshake", "timeout"],
+    )
+    async def test_transport_failure_keeps_token(
+        self, monkeypatch: MonkeyPatch, fake_rest: FakeRest, error: BaseException
+    ):
         first, final = FakeSocket(), FakeSocket()
         client, _ = _setup_reconnecting(
             monkeypatch,
             fake_rest,
-            _sequence(FakeConnection(first), FailingConnection(OSError()), FakeConnection(final)),
+            _sequence(FakeConnection(first), FailingConnection(error), FakeConnection(final)),
         )
         async with client:
             token = client.token
@@ -999,12 +1041,14 @@ class TestReconnect:
             monkeypatch, fake_rest, _sequence(FakeConnection(first), *(FakeConnection(s) for s in reconnects))
         )
         client.reconnect_max_relogins = 2
+        client.queue = _RecordingQueue(client)
         async with client:
             first.close()
             await _wait_until(lambda: client._closed is not None)
             assert isinstance(client._closed, ConnectionLost)
             assert client._connected.is_set()
             assert _validate_count(first, *reconnects) == 2  # never issues a 3rd VALIDATE_PASSWORD
+            assert client.queue.closed_at_sentinel[-1]  # subscribers are woken after the client closed
             with raises(ConnectionLost):
                 await client.get_grid_status("A")  # gated call fails promptly, no hang
 
@@ -1017,10 +1061,12 @@ class TestReconnect:
             fake_rest,
             _sequence(FakeConnection(first), FakeConnection(reject_hello), FakeConnection(reject_login)),
         )
+        client.queue = _RecordingQueue(client)
         async with client:
             first.close()
             await _wait_until(lambda: client._closed is not None)
             assert isinstance(client._closed, AuthenticationFailed)  # permanent — no retry loop
+            assert client.queue.closed_at_sentinel[-1]  # subscribers are woken after the client closed
             with raises(AuthenticationFailed):
                 await client.get_grid_status("A")
 
@@ -1077,6 +1123,62 @@ class TestReconnect:
             await client.__aenter__()
         assert client._supervisor is None
         assert client.consumer is None and client.socket is None
+
+    async def test_timed_out_reconnect_handshake_backs_off_hardest(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, second, final = FakeSocket(), FakeSocket(), FakeSocket()
+        client, delays = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), FakeConnection(second), FakeConnection(final))
+        )
+        client.reconnect_initial_backoff = 1.0
+        client.reconnect_max_backoff = 50.0
+        hello = client._hello
+
+        async def hello_timing_out_on_second():
+            if client.socket is second:
+                raise RequestTimeout("No HELLO received within 10s.")
+            await hello()
+
+        monkeypatch.setattr(client, "_hello", hello_timing_out_on_second)
+        async with client:
+            first.close()
+            await _wait_until(lambda: client.socket is final and client._connected.is_set())
+            assert delays == [1.0, 50.0]  # the timed-out attempt backs off with the maximum delay
+            assert _validate_count(final) == 1  # and drops the token, so the next attempt logs in again
+
+    async def test_supervisor_crash_closes_the_client(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first = FakeSocket()
+        client, _ = _setup_reconnecting(monkeypatch, fake_rest, _sequence(FakeConnection(first)))
+
+        async def crash():
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(client, "_reconnect_with_backoff", crash)
+        client.queue = _RecordingQueue(client)
+        async with client:
+            first.close()
+            await _wait_until(lambda: client._closed is not None)
+            assert isinstance(client._closed, ConnectionLost)
+            assert client.queue.closed_at_sentinel[-1]
+            with raises(ConnectionLost):
+                await wait_for(client.get_grid_status("A"), 1)  # fails promptly rather than hanging
+        assert client.httpx_client is None  # the crashed supervisor does not stop the teardown
+
+    async def test_exit_while_reconnecting_wakes_subscribers(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first = FakeSocket()
+        client, _ = _setup_reconnecting(monkeypatch, fake_rest, _sequence(FakeConnection(first)))
+        parked = Event()
+
+        async def parked_sleep(_delay):
+            parked.set()
+            await Event().wait()  # park the supervisor in its backoff
+
+        monkeypatch.setattr("pybluecurrent.client.sleep", parked_sleep)
+        client.queue = _RecordingQueue(client)
+        async with client:
+            first.close()
+            await wait_for(parked.wait(), 1)
+            assert client.consumer is None  # no handler left to send a sentinel on the way out
+        assert client.queue.closed_at_sentinel[-1]
 
 
 class TestLogging:
