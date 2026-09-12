@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project is pre-1.0: breaking changes may land in minor releases.
 
-## [Unreleased]
+## [0.4.1] - 2026-09-12
 
 ### Fixed
 
@@ -93,7 +93,7 @@ This project is pre-1.0: breaking changes may land in minor releases.
 - `get_account` returns `first_login_app` as a `datetime` (previously a `date`).
 - Internal: switched tooling to Ruff and ty, added a Python 3.10–3.13 CI matrix, and moved to PyPI trusted publishing (OIDC).
 
-[Unreleased]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.4.0...HEAD
+[0.4.1]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.1.1...0.2.0
