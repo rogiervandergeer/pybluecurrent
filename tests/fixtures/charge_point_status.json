@@ -15,6 +15,7 @@
       "max_offline": 10,
       "max_usage": 20,
       "offline_since": "",
+      "smart_current_heartbeat_timeout": 0,
       "smartcharging_max_usage": 6,
       "socket_id": 1,
       "start_datetime": "20230724 15:25:33",

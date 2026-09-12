@@ -2,11 +2,12 @@ from asyncio import Event, Lock, Queue, Task, create_task, get_running_loop, sle
 from asyncio import TimeoutError as AsyncTimeoutError
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from datetime import date, time
 from json import JSONDecodeError, dumps, loads
 from logging import getLogger
 from random import uniform
-from typing import Any, AsyncIterable, AsyncIterator, Iterable, cast
+from typing import Any, AsyncGenerator, AsyncIterable, AsyncIterator, Iterable, cast
 from uuid import uuid4
 
 from asyncio_multisubscriber_queue import MultisubscriberQueue
@@ -102,9 +103,12 @@ _CONNECTION_CLOSED = object()
 # Frame fields masked before a received message is logged, so a token never reaches the logs.
 _SENSITIVE_KEYS = ("token", "Authorization")
 
+# The login verdicts, which carry the session token: never yielded by live_updates.
+_LOGIN_OBJECTS = ("STATUS_PASSWORD", "STATUS_API_TOKEN")
+
 
 def _redact(message):
-    """Return the message with any sensitive fields masked, for safe logging."""
+    """Return the message with any sensitive fields masked, for safe logging and for live_updates."""
     if isinstance(message, dict) and any(key in message for key in _SENSITIVE_KEYS):
         return {key: ("***" if key in _SENSITIVE_KEYS else value) for key, value in message.items()}
     return message
@@ -195,6 +199,69 @@ class BlueCurrentClient:
             await wait({self._supervisor})
             self._supervisor = None
         await self._teardown(exc_type, exc_val, exc_tb)
+
+    @property
+    def connected(self) -> bool:
+        """Whether the websocket is up and usable right now.
+
+        False before the client is entered, while it reconnects after a drop, and once it has closed
+        or given up. A silent network drop still reads True until the keepalive notices it, which
+        takes about 40 seconds.
+        """
+        return self._closed is None and self._drop_reason is None and self._connected.is_set()
+
+    async def live_updates(self, *objects: str) -> AsyncGenerator[dict[str, Any], None]:
+        """Yield messages from the backend as they arrive, for as long as the client lives.
+
+        The backend pushes messages of its own accord — the grid current, and the status of a charge
+        point while it changes. Subscribing survives reconnects: messages sent while the connection
+        was down are lost, but the generator carries on once it is back.
+
+        Args:
+            objects: The message types to yield, such as "GRID_CURRENT". Every message is yielded
+                when no type is given — including the replies to your own calls and the handshake of
+                each (re)connect, so it is usually worth naming the types you want.
+
+        Yields:
+            Each message as a dictionary, with its type under "object".
+
+        Raises:
+            RuntimeError: If the client was never connected.
+            ConnectionLost: If the client stops reconnecting, or the connection drops while
+                auto_reconnect is off.
+            AuthenticationFailed: If the credentials are rejected while reconnecting.
+
+        The generator ends when the client is closed. It starts receiving at the first read, not
+        when you call it, so a message that arrives in between is missed. Messages queue up while
+        you are not reading them, so consume promptly, and close the generator
+        (``contextlib.aclosing``, or by letting the loop end) to stop the queueing. An ``ERROR`` the
+        backend broadcasts is yielded as a message like any other, not raised.
+        """
+        with self.queue.queue() as q:
+            # Check after subscribing, never before: a client that is already gone would otherwise
+            # block here forever instead of saying so.
+            if self._closed is not None:
+                raise self._closed
+            if self.socket is None and self._supervisor is None:
+                raise RuntimeError(f"{self.__class__.__name__} is not connected.")
+            if self._supervisor is None and self._drop_reason is not None:
+                raise self._drop_reason  # dropped with no supervisor to reconnect (auto_reconnect off)
+            session = self._connected  # a fresh Event per __aenter__, so it identifies this session
+            while True:
+                message = await q.get()
+                if message is _CONNECTION_CLOSED:
+                    if self._shutting_down or self._connected is not session:
+                        return  # this generator's session is over, even if the client was re-entered
+                    if self._closed is None and self._supervisor is not None:
+                        continue  # a drop the supervisor is about to reconnect
+                    raise self._closed or self._drop_reason or ConnectionLost("The connection was closed.")
+                if message.get("object") in _LOGIN_OBJECTS:
+                    continue  # never hand out the frames carrying the session token
+                if objects and message.get("object") not in objects:
+                    continue
+                # A copy per consumer: the same dictionary reaches every subscriber, and the calls
+                # awaiting a reply of their own parse and rename its fields in place.
+                yield deepcopy(_redact(message))
 
     def _now(self) -> float:
         """The running loop's clock, behind a seam so tests can drive reconnect timing."""
@@ -690,6 +757,7 @@ class BlueCurrentClient:
                     "smartcharging_max_usage": 6,
                     "max_offline": 10,
                     "offline_since": "",
+                    "smart_current_heartbeat_timeout": 0,
                     "start_datetime": datetime(2023, 7, 24, 15, 25, 33),
                     "stop_datetime": datetime(2023, 7, 26, 7, 48, 40),
                     "total_cost": 9.93,
@@ -1186,7 +1254,9 @@ class BlueCurrentClient:
                 message_flow_id = message.get("flow_id")
                 if flow_id is not None and message_flow_id is not None and message_flow_id != flow_id:
                     continue  # another call's confirmation for the same object
-                return message
+                # A copy, because every subscriber received this same dictionary and the caller goes
+                # on to parse and rename its fields in place.
+                return deepcopy(message)
 
     async def _send(self, data: dict[str, Any], token: bool = False):
         terminal = self._closed or self._drop_reason

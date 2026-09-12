@@ -24,6 +24,7 @@
         4,
         5
       ],
+      "smart_current_heartbeat_timeout": 0,
       "start_time": "23:00",
       "value": true
     },

@@ -1,8 +1,25 @@
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 from pytest import raises
 
-from pybluecurrent.utilities import parse_datetime_keys, parse_list_datetime_keys, parse_number_keys
+from pybluecurrent.utilities import parse_datetime_keys, parse_list_datetime_keys, parse_number_keys, to_jsonable
+
+
+class TestToJsonable:
+    def test_renders_dates_and_times(self):
+        source = {"a": datetime(2026, 7, 3, 10, 30), "b": date(2026, 7, 3), "c": time(9, 30)}
+        # A time of day renders as "HH:MM", the format the setters accept, so it can go straight back.
+        assert to_jsonable(source) == {"a": "2026-07-03T10:30:00", "b": "2026-07-03", "c": "09:30"}
+
+    def test_recurses_into_dicts_and_lists(self):
+        source = {"delayed_charging": {"value": True, "start_time": time(23, 0), "days": [1, 2]}}
+        assert to_jsonable(source) == {"delayed_charging": {"value": True, "start_time": "23:00", "days": [1, 2]}}
+
+    def test_leaves_the_rest_alone(self):
+        source = {"a": 1, "b": None, "c": "text", "d": [{"e": 2.5}]}
+        result = to_jsonable(source)
+        assert result == source
+        assert result is not source and result["d"] is not source["d"]  # a copy, not the original
 
 
 class TestParseDateTimeKeys:

@@ -34,11 +34,15 @@ class DelayedCharging(BoolSetting, total=False):
     vocabulary as ``set_delayed_charging_schedule(days=...)``; the backend's own read key
     (``selected_days``) is normalized to ``days`` before you see it. ``start_time``/``end_time``
     are parsed from the backend's "HH:MM" strings into ``time`` objects.
+
+    ``smart_current_heartbeat_timeout`` is positive while this profile is holding a session back,
+    and ``0`` otherwise; see ``ChargePointStatus``, which carries the same field per socket.
     """
 
     start_time: time
     end_time: time
     days: list[int]
+    smart_current_heartbeat_timeout: int
 
 
 class PriceBasedCharging(BoolSetting, total=False):
@@ -221,6 +225,20 @@ class GridStatus(TypedDict):
     grid_max_reserved: float  # maximum grid current the charge point(s) may use together
 
 
+class GridCurrent(TypedDict):
+    """A grid-current message, as the backend pushes it to ``live_updates`` (currents in amps).
+
+    Unlike ``GridStatus``, which ``get_grid_status`` returns, this carries only the actual currents
+    of the grid connection a charge point is on, without its maximums.
+    """
+
+    object: str
+    evse_id: str
+    grid_actual_p1: float  # actual current on grid phase L1
+    grid_actual_p2: float  # actual current on grid phase L2
+    grid_actual_p3: float  # actual current on grid phase L3
+
+
 class SustainabilityStatus(TypedDict):
     """Sustainability statistics, as returned by ``get_sustainability_status``."""
 
@@ -228,9 +246,7 @@ class SustainabilityStatus(TypedDict):
     co2: float
 
 
-class ChargePointStatus(TypedDict):
-    """The live status of a charge point, as returned by ``get_charge_point_status``."""
-
+class _ChargePointStatusBase(TypedDict):
     actual_p1: float
     actual_p2: float
     actual_p3: float
@@ -250,6 +266,20 @@ class ChargePointStatus(TypedDict):
     vehicle_status: str
     evse_id: str
     socket_id: int
+
+
+class ChargePointStatus(_ChargePointStatusBase, total=False):
+    """The live status of a charge point, as returned by ``get_charge_point_status``.
+
+    ``smart_current_heartbeat_timeout`` is positive while a smart-charging profile is holding this
+    session back, and ``0`` when it is not. A positive value together with ``vehicle_status`` "C" (a
+    car that is ready to charge) is what the BlueCurrent app shows as "Scheduled", and the state
+    ``boost`` overrides. The app guards against it being absent or ``None`` here and falls back to
+    the copy in the ``delayed_charging`` setting, so treat both as "no information". The unit is
+    undocumented.
+    """
+
+    smart_current_heartbeat_timeout: int | None
 
 
 class Contract(TypedDict):

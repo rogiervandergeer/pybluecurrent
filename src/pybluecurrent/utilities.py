@@ -13,12 +13,24 @@ def format_date(value: date) -> str:
 
 
 def to_jsonable(source: dict[str, Any]) -> dict[str, Any]:
-    """Copy a response dictionary with its date(time)s rendered as ISO strings, leaving the rest as is.
+    """Copy a response dictionary with its dates and times rendered as strings, nested values included.
 
-    The parsed datetimes are naive, so the strings are naive too.
+    Dates and datetimes become ISO strings; the parsed datetimes are naive, so the strings are too.
+    Times of day become "HH:MM" — the format the setters accept, so a value can go straight back.
     """
-    # datetime is a subclass of date, so (date, time) covers all three.
-    return {key: value.isoformat() if isinstance(value, (date, time)) else value for key, value in source.items()}
+    return {key: _to_jsonable_value(value) for key, value in source.items()}
+
+
+def _to_jsonable_value(value: Any) -> Any:
+    if isinstance(value, time):
+        return format_time(value)
+    if isinstance(value, date):  # datetime is a subclass of date, so this covers both
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _to_jsonable_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_jsonable_value(item) for item in value]
+    return value
 
 
 def parse_time(value: str) -> time:

@@ -65,6 +65,25 @@ client = BlueCurrentClient(api_token="your_api_token")
 Retrieve or rotate the token with [`get_api_token`](#get_api_token) and
 [`generate_api_token`](#generate_api_token), or from the [BlueCurrent website](https://my.bluecurrent.nl).
 
+A long-lived client reconnects by itself when the connection drops. `client.connected` tells you whether
+the websocket is up right now; calls made while it is reconnecting wait for the connection to return.
+
+### Live updates
+
+Besides answering your calls, the backend sends messages of its own accord: the grid current, and the
+status of a charge point while it changes. `live_updates` yields them as they arrive, across reconnects:
+
+```python
+async with client:
+    async for message in client.live_updates("GRID_CURRENT"):
+        print(message["evse_id"], message["grid_actual_p1"])
+```
+
+Name the message types you want, or omit them to receive everything — including the replies to your own
+calls. Messages sent while the connection is down are lost, as are messages arriving before your first
+read. The loop ends when the client is closed, and raises if the client stops reconnecting:
+`ConnectionLost`, or `AuthenticationFailed` when the credentials are rejected.
+
 ## Command line
 
 Installing the package also installs a `pybluecurrent` command, which exports your transactions:
@@ -90,7 +109,8 @@ or from the matching `--username` / `--password` / `--api-token` options.
 
 ## Methods
 
-Every method is a coroutine on `BlueCurrentClient`; call them inside the async context (see
+Every method is a coroutine on `BlueCurrentClient`, except `iterate_transactions` and `live_updates`,
+which are async generators to iterate with `async for`. Call them inside the async context (see
 [Connection](#connection)). Charge points are addressed by their `evse_id`.
 
 - **Account & authentication** — [`get_account`](#get_account), [`get_api_token`](#get_api_token), [`generate_api_token`](#generate_api_token), [`get_contracts`](#get_contracts)
@@ -99,6 +119,7 @@ Every method is a coroutine on `BlueCurrentClient`; call them inside the async c
 - **Settings & control** — [`set_plug_and_charge_charge_card`](#set_plug_and_charge_charge_card), [`set_status`](#set_status), [`set_capacity_tariff`](#set_capacity_tariff), [`unlock_connector`](#unlock_connector), [`soft_reset`](#soft_reset), [`reboot`](#reboot)
 - **Smart charging** — [`set_delayed_charging`](#set_delayed_charging), [`set_delayed_charging_schedule`](#set_delayed_charging_schedule), [`set_price_based_charging`](#set_price_based_charging), [`set_price_based_charging_settings`](#set_price_based_charging_settings), [`boost`](#boost)
 - **Transactions** — [`get_transactions`](#get_transactions), [`iterate_transactions`](#iterate_transactions)
+- **Live updates** — [`live_updates`](#live-updates)
 
 ### Response models
 
@@ -114,7 +135,7 @@ from pybluecurrent.models import ChargePoint, Transaction
 
 **The model definitions are the field-level reference** — each field, its type, and any parsing
 notes live there. The response types are `Account`, `ChargeCard`, `ChargePoint`,
-`ChargePointSettings`, `ChargePointStatus`, `GridStatus`, `Grid`, `SustainabilityStatus`,
+`ChargePointSettings`, `ChargePointStatus`, `GridStatus`, `GridCurrent`, `Grid`, `SustainabilityStatus`,
 `Contract`, `TransactionsPage` and `Transaction`, built from the nested shapes `Tariff`,
 `Location`, `Address`, `DelayedCharging`, `PriceBasedCharging`, `CapacityTariff`, `CardRef`,
 `BoolSetting` and `IntSetting`. Dates and times are parsed for you: `date`/`datetime` fields are Python objects, and

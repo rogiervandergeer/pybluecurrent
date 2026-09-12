@@ -70,8 +70,9 @@ class TestSocketApi:
         charge_points = await connected_client.get_charge_points()
         if len(charge_points) == 0:
             skip(reason="No charge cards.")
-        # The aggregate carries a nullable singular socket_id we deliberately don't model; ignore it.
-        assert_model(charge_points, list[ChargePoint], ignore={"socket_id"})
+        # The aggregate carries a nullable singular socket_id we deliberately don't model, and a
+        # solar-based charging profile the account has no access to; ignore both.
+        assert_model(charge_points, list[ChargePoint], ignore={"socket_id", "solar_based_charging"})
         for charge_point in charge_points:
             assert "evse_id" in charge_point
             assert "socket_ids" in charge_point
@@ -84,7 +85,7 @@ class TestSocketApi:
 
     async def test_get_charge_point_settings(self, connected_client: BlueCurrentClient, evse_id: str):
         settings = await connected_client.get_charge_point_settings(evse_id=evse_id)
-        assert_model(settings, ChargePointSettings)
+        assert_model(settings, ChargePointSettings, ignore={"solar_based_charging"})
         assert settings["evse_id"] == evse_id
 
     async def test_get_sustainability_status(self, connected_client: BlueCurrentClient):
@@ -275,7 +276,9 @@ class TestDelayedCharging:
         status = await connected_client.get_charge_point_status(evse_id=evse_id, socket_id=socket_id)
         if status["boosting"]:
             skip(reason="A boost is already active.")
-        if status["vehicle_status"] != "B":
+        # A car that is ready to charge while the profile holds the session back — the state the app
+        # shows as "Scheduled", and the only one a boost applies to.
+        if status["vehicle_status"] != "C" or not status.get("smart_current_heartbeat_timeout"):
             skip(reason="No session is waiting for the delayed charging window.")
 
         await connected_client.boost(evse_id)
