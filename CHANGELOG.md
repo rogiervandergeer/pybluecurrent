@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project is pre-1.0: breaking changes may land in minor releases.
 
+## [Unreleased]
+
+### Added
+
+- `live_updates()` yields the messages the backend sends by itself, such as the grid current and a charge point's live status, as an async generator that survives reconnects. Name the message types you want (`live_updates("GRID_CURRENT")`) or take everything. The login messages are never yielded, since they carry the session token.
+- `connected`, telling you whether the websocket is up right now.
+- `smart_current_heartbeat_timeout` on `ChargePointStatus` and on the `delayed_charging` setting. It is positive while a smart-charging profile is holding a session back — with `vehicle_status` `"C"` the state the BlueCurrent app shows as "Scheduled", and the one `boost()` overrides.
+- `GridCurrent`, the response model for a pushed grid-current message.
+
 ## [0.4.1] - 2026-09-12
 
 ### Fixed
@@ -93,6 +102,7 @@ This project is pre-1.0: breaking changes may land in minor releases.
 - `get_account` returns `first_login_app` as a `datetime` (previously a `date`).
 - Internal: switched tooling to Ruff and ty, added a Python 3.10–3.13 CI matrix, and moved to PyPI trusted publishing (OIDC).
 
+[Unreleased]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.4.1...HEAD
 [0.4.1]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.2.0...0.3.0

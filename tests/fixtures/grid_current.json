@@ -1,0 +1,7 @@
+{
+  "evse_id": "BCU123456",
+  "grid_actual_p1": 2,
+  "grid_actual_p2": 1,
+  "grid_actual_p3": 6,
+  "object": "GRID_CURRENT"
+}

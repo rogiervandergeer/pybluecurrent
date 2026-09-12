@@ -31,6 +31,7 @@ from pybluecurrent.models import (
     ChargePoint,
     ChargePointSettings,
     ChargePointStatus,
+    GridCurrent,
     GridStatus,
     SustainabilityStatus,
     TransactionsPage,
@@ -133,13 +134,16 @@ class TestOfflineTransport:
             await offline_client._receive("NEVER_ARRIVES", timeout=0)
 
     async def test_handler_fans_out_to_all_waiters(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
-        # A single frame reaches every concurrent waiter.
+        # A single frame reaches every concurrent waiter, each as its own copy: the callers parse
+        # and rename fields in place, which must not reach anyone else.
         first = create_task(offline_client._receive("PING"))
         second = create_task(offline_client._receive("PING"))
         await sleep(0)
         fake_socket.feed({"object": "PING", "value": 1})
-        assert (await first)["value"] == 1
-        assert (await second)["value"] == 1
+        one, two = await gather(first, second)
+        assert one["value"] == two["value"] == 1
+        one["value"] = 2
+        assert two["value"] == 1
 
     @mark.parametrize("frame", ["this is not json", "[1, 2]", "42"], ids=["non-json", "array", "scalar"])
     async def test_malformed_frame_is_skipped(
@@ -1179,6 +1183,214 @@ class TestReconnect:
             await wait_for(parked.wait(), 1)
             assert client.consumer is None  # no handler left to send a sentinel on the way out
         assert client.queue.closed_at_sentinel[-1]
+
+
+async def _subscribed(client: BlueCurrentClient, *objects: str):
+    """Start a live_updates generator and wait until it is subscribed; return it and a pending read.
+
+    The generator only subscribes when it is first read, so a message fed before that is missed —
+    exactly as it would be by a real subscriber that is not listening yet.
+    """
+    generator = client.live_updates(*objects)
+    before = len(client.queue)  # relative, so this works with a subscriber already listening
+    read = create_task(anext(generator))
+    await _wait_until(lambda: len(client.queue) > before)
+    return generator, read
+
+
+class TestLiveUpdates:
+    """The public feed of server messages: what it yields, and how it ends."""
+
+    async def test_yields_pushed_messages(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        generator, read = await _subscribed(offline_client)
+        fake_socket.feed(load_fixture("grid_current"))
+        message = await wait_for(read, 1)
+        assert_model(message, GridCurrent)
+        assert message["grid_actual_p1"] == 2
+        await generator.aclose()
+
+    async def test_filters_on_object(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        generator, read = await _subscribed(offline_client, "GRID_CURRENT")
+        fake_socket.feed({"object": "HELLO"})
+        fake_socket.feed(load_fixture("grid_current"))
+        assert (await wait_for(read, 1))["object"] == "GRID_CURRENT"
+        await generator.aclose()
+
+    async def test_withholds_login_frames_and_redacts_tokens(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket
+    ):
+        generator, read = await _subscribed(offline_client)
+        fake_socket.feed({"object": "STATUS_PASSWORD", "accepted": True, "token": "secret"})
+        fake_socket.feed({"object": "STATUS_API_TOKEN", "success": True, "token": "secret"})
+        fake_socket.feed({"object": "CH_STATUS", "evse_id": "BCU123456", "token": "secret"})
+        assert await wait_for(read, 1) == {"object": "CH_STATUS", "evse_id": "BCU123456", "token": "***"}
+        await generator.aclose()
+
+    async def test_yields_a_copy_to_every_consumer(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        # The same dictionary reaches every subscriber, so each generator must hand out its own copy.
+        one, read_one = await _subscribed(offline_client)
+        two, read_two = await _subscribed(offline_client)
+        fake_socket.feed({"object": "CH_STATUS", "value": 1})
+        first, second = await gather(wait_for(read_one, 1), wait_for(read_two, 1))
+        first["value"] = 2
+        assert second["value"] == 1
+        await one.aclose()
+        await two.aclose()
+
+    async def test_subscribing_during_a_reconnect(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, second = FakeSocket(), FakeSocket()
+        second.responder.pop("HELLO")  # withhold the reconnect handshake until we release it
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), FakeConnection(second))
+        )
+        async with client:
+            first.close()
+            await _wait_until(lambda: client.socket is second and not client.connected)
+            generator, read = await _subscribed(client, "GRID_CURRENT")  # subscribe mid-reconnect
+            second.feed({"object": "HELLO"})  # release the handshake
+            await _wait_until(lambda: client.connected)
+            second.feed(load_fixture("grid_current"))
+            assert (await wait_for(read, 1))["object"] == "GRID_CURRENT"
+            await generator.aclose()
+
+    async def test_subscribing_after_a_drop_without_auto_reconnect(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket
+    ):
+        fake_socket.close()
+        await _drain(offline_client)
+        with raises(ConnectionLost):
+            await anext(offline_client.live_updates())
+
+    async def test_cancelling_the_consumer_unsubscribes(self, offline_client: BlueCurrentClient):
+        _, read = await _subscribed(offline_client)
+        read.cancel()
+        await _wait_until(lambda: len(offline_client.queue) == 0)
+
+    async def test_survives_a_reconnect(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, second = FakeSocket(), FakeSocket()
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), FakeConnection(second))
+        )
+        async with client:
+            generator, read = await _subscribed(client, "GRID_CURRENT")
+            first.close()
+            await _wait_until(lambda: client.socket is second and client.connected)
+            second.feed(load_fixture("grid_current"))
+            assert (await wait_for(read, 1))["object"] == "GRID_CURRENT"
+            await generator.aclose()
+
+    async def test_ends_when_the_client_closes(
+        self, monkeypatch: MonkeyPatch, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
+        monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
+        client = BlueCurrentClient("username", "password")
+        async with client:
+            _, read = await _subscribed(client)
+        with raises(StopAsyncIteration):
+            await wait_for(read, 1)
+
+    async def test_ends_with_its_own_session_when_the_client_is_re_entered(
+        self, monkeypatch: MonkeyPatch, fake_rest: FakeRest
+    ):
+        # A generator belongs to the session it started in: re-entering the client must not revive
+        # it, nor make it report the new session's state.
+        first, second = FakeSocket(), FakeSocket()
+        monkeypatch.setattr(
+            "pybluecurrent.client.connect",
+            make_reconnecting_connect(_sequence(FakeConnection(first), FakeConnection(second))),
+        )
+        monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
+        client = BlueCurrentClient("username", "password")
+        client.auto_reconnect = False
+        async with client:
+            generator, read = await _subscribed(client)
+            first.feed({"object": "CH_STATUS"})
+            await wait_for(read, 1)
+        async with client:  # a second session on the same client
+            with raises(StopAsyncIteration):
+                await wait_for(anext(generator), 1)
+
+    async def test_raises_when_the_client_gives_up(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first = FakeSocket()
+        reconnects = [FakeSocket() for _ in range(4)]
+        for socket in reconnects:
+            socket.on("HELLO", {"object": "ERROR", "error": 1, "message": "Invalid Auth Token"})
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), *(FakeConnection(s) for s in reconnects))
+        )
+        client.reconnect_max_relogins = 2
+        async with client:
+            # Filtered, so the ERROR frames of the failing reconnects are not yielded first.
+            _, read = await _subscribed(client, "CH_STATUS")
+            first.close()
+            with raises(ConnectionLost):
+                await wait_for(read, 1)
+
+    async def test_raises_on_a_drop_without_auto_reconnect(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket
+    ):
+        _, read = await _subscribed(offline_client)
+        fake_socket.close()
+        with raises(ConnectionLost):
+            await wait_for(read, 1)
+
+    async def test_raises_without_a_connection(self, client: BlueCurrentClient):
+        with raises(RuntimeError):
+            await anext(client.live_updates())
+
+    async def test_raises_after_the_client_closed(
+        self, monkeypatch: MonkeyPatch, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
+        monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
+        client = BlueCurrentClient("username", "password")
+        async with client:
+            pass
+        with raises(ConnectionLost):
+            await anext(client.live_updates())
+
+    async def test_closing_unsubscribes(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        generator, read = await _subscribed(offline_client)
+        assert len(offline_client.queue) == 1
+        fake_socket.feed({"object": "CH_STATUS"})
+        await wait_for(read, 1)
+        await generator.aclose()
+        assert len(offline_client.queue) == 0
+
+
+class TestConnected:
+    """The public connection state."""
+
+    async def test_follows_the_client_lifecycle(
+        self, monkeypatch: MonkeyPatch, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
+        monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
+        client = BlueCurrentClient("username", "password")
+        assert not client.connected  # never entered
+        async with client:
+            assert client.connected
+        assert not client.connected  # closed
+
+    async def test_false_after_a_drop(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        assert offline_client.connected
+        fake_socket.close()  # this client does not reconnect
+        await _drain(offline_client)
+        assert not offline_client.connected
+
+    async def test_false_until_the_reconnect_handshake_completes(self, monkeypatch: MonkeyPatch, fake_rest: FakeRest):
+        first, second = FakeSocket(), FakeSocket()
+        second.responder.pop("HELLO")  # withhold the reconnect handshake until we release it
+        client, _ = _setup_reconnecting(
+            monkeypatch, fake_rest, _sequence(FakeConnection(first), FakeConnection(second))
+        )
+        async with client:
+            first.close()
+            await _wait_until(lambda: client.socket is second)
+            assert not client.connected  # socket in place, handshake unfinished
+            second.feed({"object": "HELLO"})
+            await _wait_until(lambda: client.connected)
 
 
 class TestLogging:
