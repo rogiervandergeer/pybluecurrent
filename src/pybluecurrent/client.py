@@ -1,7 +1,7 @@
-from asyncio import CancelledError, Event, Lock, Queue, Task, create_task, get_running_loop, sleep, wait, wait_for
+from asyncio import Event, Lock, Queue, Task, create_task, get_running_loop, sleep, wait, wait_for
 from asyncio import TimeoutError as AsyncTimeoutError
 from collections import defaultdict, deque
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import date, time
 from json import JSONDecodeError, dumps, loads
 from logging import getLogger
@@ -13,7 +13,7 @@ from asyncio_multisubscriber_queue import MultisubscriberQueue
 from httpx import AsyncClient, HTTPStatusError
 from sjcl import SJCL
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from pybluecurrent._version import __version__
 from pybluecurrent.enums import Weekday
@@ -94,8 +94,9 @@ def _normalize_charge_point(data: dict[str, Any]) -> None:
         data["plug_and_charge_charge_card"] = None
 
 
-# Identity sentinel broadcast on the queue when the receive handler exits, so in-flight _receive
-# waiters wake immediately instead of blocking until their own deadline.
+# Identity sentinel broadcast on the queue when the receive handler exits, and again once the client
+# is closed for good, so in-flight _receive waiters wake immediately instead of blocking until their
+# own deadline.
 _CONNECTION_CLOSED = object()
 
 # Frame fields masked before a received message is logged, so a token never reaches the logs.
@@ -186,12 +187,12 @@ class BlueCurrentClient:
         logger.debug("Closing BlueCurrent connection")
         self._shutting_down = True
         self._closed = self._closed or ConnectionLost("Client is shutting down.")
-        self._connected.set()  # release any gated waiter so it sees _closed
         if self._supervisor is not None:
-            # Stop the supervisor first so it can't race a reconnect against the teardown below.
+            # Stop the supervisor first so it can't race a reconnect against the teardown below; its
+            # finally wakes every waiter. wait(), not `await`: a crashed supervisor must not re-raise
+            # here and skip the teardown.
             self._supervisor.cancel()
-            with suppress(CancelledError):
-                await self._supervisor
+            await wait({self._supervisor})
             self._supervisor = None
         await self._teardown(exc_type, exc_val, exc_tb)
 
@@ -220,9 +221,10 @@ class BlueCurrentClient:
     async def _teardown_transport(self, exc_type=None, exc_val=None, exc_tb=None) -> None:
         """Close the websocket transport (handler + socket) but keep the httpx client so REST keeps working."""
         if self.consumer is not None:
-            self.consumer.cancel()  # stop the handler and await it so its exception is retrieved
-            with suppress(CancelledError):
-                await self.consumer
+            self.consumer.cancel()
+            # wait(), not `await`: a handler that died of a dropped connection must not re-raise its
+            # error here (_on_handler_done logs it), which would kill the reconnect supervisor.
+            await wait({self.consumer})
         if self.connection is not None:
             try:
                 await self.connection.__aexit__(exc_type, exc_val, exc_tb)
@@ -245,7 +247,11 @@ class BlueCurrentClient:
         if task.cancelled():
             return
         exc = task.exception()
-        if exc is not None:
+        if isinstance(exc, ConnectionClosed):
+            # A connection dropping without a close handshake is routine, and the supervisor logs
+            # the reconnect: a stack trace here would make every network blip look like a crash.
+            logger.debug("Websocket connection closed: %r", exc)
+        elif exc is not None:
             logger.error("Websocket receive handler exited", exc_info=exc)
 
     def _on_supervisor_done(self, task: Task) -> None:
@@ -268,6 +274,7 @@ class BlueCurrentClient:
 
     async def _supervise(self) -> None:
         """Own the connection for the client's lifetime: reconnect after drops until told to stop."""
+        reason: BlueCurrentException = ConnectionLost("Reconnect supervisor stopped unexpectedly.")
         try:
             while not self._shutting_down:
                 await self._wait_for_drop()
@@ -278,18 +285,21 @@ class BlueCurrentClient:
                 await self._teardown_transport()
                 if self._now() - self._last_connect >= self.reconnect_stable_period:
                     self._backoff = self.reconnect_initial_backoff  # stable uptime → reset (flap guard)
-                try:
-                    await self._reconnect_with_backoff()
-                except _GiveUp as give_up:
-                    await self._teardown_transport()  # release the giving-up attempt's partial transport
-                    logger.error("Reconnect abandoned: %s", give_up.reason)
-                    self._closed = give_up.reason
-                    self._connected.set()  # wake blocked waiters so they immediately re-raise _closed
-                    return
+                await self._reconnect_with_backoff()
                 logger.info("Reconnected")
                 self._connected.set()
+        except _GiveUp as give_up:
+            await self._teardown_transport()  # release the giving-up attempt's partial transport
+            logger.error("Reconnect abandoned: %s", give_up.reason)
+            reason = give_up.reason
         finally:
-            self._connected.set()  # never leave a waiter blocked forever
+            # However the supervisor ends (given up, shut down, or crashed), nobody reconnects any
+            # more: latch the client closed (an earlier reason wins) and wake every waiter — gated
+            # calls through _connected, queue subscribers through a sentinel sent after _closed, so
+            # it reads as final. The broadcast never suspends: every subscriber queue is unbounded.
+            self._closed = self._closed or reason
+            self._connected.set()
+            await self.queue.put(_CONNECTION_CLOSED)
 
     async def _wait_for_drop(self) -> None:
         """Block until the current handler task finishes (the connection dropped)."""
@@ -317,15 +327,17 @@ class BlueCurrentClient:
                 raise _GiveUp(exc)  # bad credentials are permanent — never retry
             except _GiveUp:
                 raise  # gave up (from _note_login_attempt)
-            except (OSError, ConnectionClosed, ConnectionLost) as exc:
+            except (OSError, WebSocketException, AsyncTimeoutError, BlueCurrentException) as exc:
+                # One clause, so the outcome no longer depends on the order in which an exception
+                # hierarchy is caught: RequestTimeout is a BlueCurrentException *and*, through
+                # TimeoutError, an OSError. A transport failure (the socket dropped, the handshake
+                # was refused — e.g. a 5xx during maintenance — or it timed out, which is a distinct
+                # asyncio.TimeoutError on Python 3.10) keeps the token; a login or hello that was
+                # rejected or went unanswered may mean a stale token, so log in again next attempt.
                 logger.debug("Reconnect attempt failed: %r", exc)
-                await self._teardown_transport()  # transport failure: keep the token and retry
-                self._grow_backoff()
-            except (RequestTimeout, BlueCurrentException) as exc:
-                # auth/hello rejected: the token may be stale, so log in again next attempt
-                logger.debug("Reconnect attempt failed: %r", exc)
-                self.token = None
                 await self._teardown_transport()
+                if isinstance(exc, BlueCurrentException) and not isinstance(exc, ConnectionLost):
+                    self.token = None
                 if isinstance(exc, RequestTimeout):
                     self._backoff = self.reconnect_max_backoff  # a timed-out login backs off hardest
                 else:
@@ -1116,8 +1128,11 @@ class BlueCurrentClient:
                 try:
                     decoded = loads(message)
                 except JSONDecodeError:
-                    # A single malformed frame is a transient wire artifact; log it and keep going.
-                    logger.warning("Discarding malformed (non-JSON) frame: %r", message)
+                    decoded = None
+                if not isinstance(decoded, dict):
+                    # A single malformed frame — not JSON, or JSON that is not an object, and so no
+                    # reply to anything — is a transient wire artifact: log it and keep going.
+                    logger.warning("Discarding malformed frame: %r", message)
                     continue
                 logger.debug("Received message: %s", _redact(decoded))
                 await self.queue.put(decoded)

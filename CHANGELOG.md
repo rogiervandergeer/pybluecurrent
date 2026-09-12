@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project is pre-1.0: breaking changes may land in minor releases.
 
+## [Unreleased]
+
+### Fixed
+
+- Automatic reconnection no longer stops for good after an abnormal disconnect. A connection that dropped without a proper close, or a reconnect attempt whose handshake was refused (for example during backend maintenance) or timed out, used to end the reconnect loop and leave the client disconnected; it now retries with backoff as intended.
+- A reconnect attempt whose login or handshake goes unanswered now waits the maximum backoff before logging in again, as intended, instead of retrying on the normal schedule.
+- When the client stops reconnecting for any reason, it is now marked as closed, so calls fail with `ConnectionLost` rather than running into a dead connection, and closing the client always releases its HTTP client.
+- A received frame that is valid JSON but not an object is now skipped, instead of failing the calls awaiting a reply.
+
 ## [0.4.0] - 2026-09-11
 
 ### Added
@@ -84,6 +93,7 @@ This project is pre-1.0: breaking changes may land in minor releases.
 - `get_account` returns `first_login_app` as a `datetime` (previously a `date`).
 - Internal: switched tooling to Ruff and ty, added a Python 3.10–3.13 CI matrix, and moved to PyPI trusted publishing (OIDC).
 
+[Unreleased]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.4.0...HEAD
 [0.4.0]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/rogiervandergeer/pybluecurrent/compare/0.1.1...0.2.0
