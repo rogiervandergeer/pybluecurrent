@@ -9,6 +9,8 @@ This project is pre-1.0: breaking changes may land in minor releases.
 
 ### Added
 
+- An MQTT relay, `pybluecurrent relay`, behind the new `mqtt` extra (`pip install pybluecurrent[mqtt]`). It publishes the live status of every socket, each charge point's settings (smart-charging profiles included), the grid current and a health topic to an MQTT broker, and optionally every charging transaction. Configure it with options or environment variables (`MQTT_HOST`, `POLL_INTERVAL`, `SYNC_TRANSACTIONS`, …). The client library keeps its own dependencies: the extra is only needed to run the relay.
+
 - `live_updates()` yields the messages the backend sends by itself, such as the grid current and a charge point's live status, as an async generator that survives reconnects. Name the message types you want (`live_updates("GRID_CURRENT")`) or take everything. The login messages are never yielded, since they carry the session token.
 - `connected`, telling you whether the websocket is up right now.
 - `smart_current_heartbeat_timeout` on `ChargePointStatus` and on the `delayed_charging` setting. It is positive while a smart-charging profile is holding a session back — with `vehicle_status` `"C"` the state the BlueCurrent app shows as "Scheduled", and the one `boost()` overrides.
