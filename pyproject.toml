@@ -38,7 +38,9 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
-dev = ["pre-commit>=3.3.3", "pytest==8.4.2", "pytest-asyncio==1.2.0", "typeguard>=4.0"]
+dev = ["aiomqtt>=2.0,<3", "pre-commit>=3.3.3", "pytest==8.4.2", "pytest-asyncio==1.2.0", "typeguard>=4.0"]
+# The MQTT relay (pybluecurrent relay); the client library itself needs none of this.
+mqtt = ["aiomqtt>=2.0,<3"]
 
 [project.scripts]
 pybluecurrent = "pybluecurrent.cli:main"
