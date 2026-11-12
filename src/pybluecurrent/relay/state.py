@@ -11,9 +11,8 @@ logger = getLogger(__name__)
 class TransactionStore:
     """The transactions published per charge point, so none is published twice.
 
-    Held as the ids that were published, with the day each session started, rather than as a
-    high-water mark: within one socket transactions arrive in order, but another socket — or another
-    charge point — can finish a session that started earlier, which a watermark would skip forever.
+    Held as the ids that were published, with the day each session ended. The backend's date filter
+    works on that day too, so whatever it returns is either still remembered here or new.
 
     Without a path the store lives in memory only, so a restart republishes its window once.
     """
@@ -22,28 +21,26 @@ class TransactionStore:
         self.path = path
         self.lookback_days = lookback_days
         self.rescan_days = rescan_days
-        self._published: dict[str, dict[int, date | None]] = {}
+        self._published: dict[str, dict[int, date]] = {}
         self._load()
 
     def seen(self, evse_id: str, transaction_id: int) -> bool:
         return transaction_id in self._published.get(evse_id, {})
 
-    def add(self, evse_id: str, transaction_id: int, started_at: datetime | None) -> None:
-        self._published.setdefault(evse_id, {})[transaction_id] = started_at.date() if started_at else None
+    def add(self, evse_id: str, transaction_id: int, ended_at: datetime) -> None:
+        self._published.setdefault(evse_id, {})[transaction_id] = ended_at.date()
 
     def start_date(self, evse_id: str) -> date | None:
-        """The oldest day still worth asking the backend for, or None for "all history".
+        """The oldest end day still worth asking the backend for, or None for "all history".
 
-        The first run scans back ``lookback_days``; later runs rescan only the window in which a
-        session that is already known could still be joined by one that started before it but
-        finished later.
+        The first run scans back ``lookback_days``; later runs rescan ``rescan_days`` before the
+        newest known end, for a session the backend lists late. Never before the horizon, though:
+        what ended earlier was forgotten, and fetching it again would republish it.
         """
         horizon = self._horizon()
-        days = [day for day in self._published.get(evse_id, {}).values() if day is not None]
+        days = self._published.get(evse_id, {}).values()
         if not days:
             return horizon
-        # The backend filters by date, so the overlap is counted in days, not hours. Never before the
-        # horizon, though: what is older was forgotten, and fetching it again would republish it.
         start = max(days) - timedelta(days=self.rescan_days)
         return start if horizon is None else max(start, horizon)
 
@@ -61,14 +58,14 @@ class TransactionStore:
             logger.error("Could not write the transaction state file: %s", error)
 
     def _prune(self) -> None:
-        """Forget what is older than the horizon: start_date never reaches back that far again."""
+        """Forget what ended before the horizon: start_date never reaches back that far again."""
         horizon = self._horizon()
         if horizon is None:
             return
-        for published in self._published.values():
-            for transaction_id, day in list(published.items()):
-                if day is not None and day < horizon:
-                    del published[transaction_id]
+        self._published = {
+            evse_id: {transaction_id: day for transaction_id, day in published.items() if day >= horizon}
+            for evse_id, published in self._published.items()
+        }
 
     def _horizon(self) -> date | None:
         """The oldest day ever scanned, or None when the whole history is."""
@@ -80,10 +77,7 @@ class TransactionStore:
         try:
             data = loads(self.path.read_text())
             self._published = {
-                evse_id: {
-                    int(transaction_id): date.fromisoformat(day) if day else None
-                    for transaction_id, day in published.items()
-                }
+                evse_id: {int(transaction_id): date.fromisoformat(day) for transaction_id, day in published.items()}
                 for evse_id, published in data.items()
             }
         except Exception as error:

@@ -16,7 +16,7 @@ from pybluecurrent.client import BlueCurrentClient
 from pybluecurrent.exceptions import BlueCurrentException
 from pybluecurrent.models import ChargePointStatus
 from pybluecurrent.relay.commands import run_command
-from pybluecurrent.relay.serialize import encode
+from pybluecurrent.relay.serialize import encode, to_utc
 from pybluecurrent.relay.settings import Settings
 from pybluecurrent.relay.state import TransactionStore
 
@@ -43,11 +43,11 @@ async def run(settings: Settings) -> None:
     published transactions outlives it too, so a broker outage does not republish them.
     """
     stopping = Event()
-    _stop_on_signals(stopping)
     client = BlueCurrentClient(username=settings.username, password=settings.password, api_token=settings.api_token)
     store = TransactionStore(
         settings.transaction_state_file, settings.transaction_lookback_days, settings.transaction_rescan_days
     )
+    _stop_on_signals(stopping)
     try:
         async with client:
             while not stopping.is_set():
@@ -70,6 +70,8 @@ async def run(settings: Settings) -> None:
             raise
     finally:
         store.save()
+        for number in (SIGINT, SIGTERM):  # give them back, for a program that runs the relay itself
+            get_running_loop().remove_signal_handler(number)
     logger.info("Stopped")
 
 
@@ -93,34 +95,34 @@ async def _serve(client: BlueCurrentClient, settings: Settings, store: Transacti
         logger.info("Connected to the broker at %s:%s", settings.mqtt_host, settings.mqtt_port)
         relay = _Relay(client, mqtt, settings, store)
         tasks = relay.start()
-        last_word: str | None = "shutdown"
+        last_word = "shutdown"
         try:
             await _until_stopped(tasks, stopping)
-        except MqttError:
-            last_word = None  # the broker is gone; there is nothing to say it on
-            raise
         except BaseException as error:
             last_word = type(error).__name__
             raise
         finally:
             await _stop_tasks(tasks)
-            if last_word is not None:
-                # Replace the retained "up".
-                await relay.publish_health("down", error=last_word, timeout=settings.shutdown_publish_timeout)
+            # Replace the retained "up", even after an MqttError: a timed-out publish raises one on
+            # a live connection, whose clean close then cancels the Will. A broker that is really
+            # gone cannot take it, but its Will says "down" then. 5 s leaves the rest of the grace
+            # period for closing the connections.
+            with suppress(MqttError):
+                await relay.publish_health("down", error=last_word, timeout=5)
 
 
-async def _stop_tasks(tasks: list[Task], timeout: float = 0.5, attempts: int = 4) -> None:
+async def _stop_tasks(tasks: list[Task]) -> None:
     """Cancel the tasks and wait, cancelling again while any still runs.
 
     On Python 3.10, wait_for can drop a cancellation that lands as its awaited call completes.
     """
-    for _ in range(attempts):
+    for _ in range(4):
         pending = [task for task in tasks if not task.done()]
         if not pending:
             return
         for task in pending:
             task.cancel()
-        await wait(pending, timeout=timeout)
+        await wait(pending, timeout=0.5)
     running = [task.get_name() for task in tasks if not task.done()]
     if running:
         logger.warning("Leaving with tasks still running: %s", ", ".join(running))
@@ -283,15 +285,15 @@ class _Relay:
             async for transaction in self.client.iterate_transactions(
                 evse_id=evse_id, newest_first=True, start_date=self.store.start_date(evse_id)
             ):
-                transaction_id = transaction["transaction_id"]
+                transaction_id, ended_at = transaction["transaction_id"], transaction.get("end_time")
                 if self.store.seen(evse_id, transaction_id):
                     continue
-                if transaction.get("end_time") is None:
+                if ended_at is None:
                     # Still going: it is published once it has ended. Logged, in case one never does.
                     logger.debug("Transaction %s of %s has not ended yet", transaction_id, evse_id)
                     continue
                 await self.publish(self.settings.transactions_topic(evse_id), _with_duration(transaction), retain=False)
-                self.store.add(evse_id, transaction_id, transaction.get("started_at"))
+                self.store.add(evse_id, transaction_id, ended_at)
                 published += 1
         except MqttError:
             raise  # the broker, not the backend
@@ -330,7 +332,8 @@ def _with_duration(transaction: Mapping[str, Any]) -> dict[str, Any]:
     started_at = transaction.get("started_at")
     if started_at is None:
         return dict(transaction)
-    return {**transaction, "duration": (transaction["end_time"] - started_at).total_seconds()}
+    # In UTC: two Dutch times on either side of a daylight-saving change are an hour off.
+    return {**transaction, "duration": (to_utc(transaction["end_time"]) - to_utc(started_at)).total_seconds()}
 
 
 def _stop_on_signals(stopping: Event) -> None:

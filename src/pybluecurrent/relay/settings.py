@@ -25,11 +25,9 @@ class Settings:
     transaction_rescan_days: int = 2
     transaction_state_file: Path | None = None
 
-    # Not on the command line. shutdown_publish_timeout leaves the rest of the grace period for closing
-    # the connections.
+    # Not on the command line.
     heartbeat_interval: float = 60.0
     mqtt_reconnect_interval: float = 30.0
-    shutdown_publish_timeout: float = 5.0
 
     def status_topic(self, evse_id: str, socket_id: int) -> str:
         return f"{self.topic_prefix}/{evse_id}/{socket_id}/status"

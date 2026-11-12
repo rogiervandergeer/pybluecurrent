@@ -65,11 +65,10 @@ class FakeMqtt:
         while True:
             yield await self._incoming.get()
 
-    def feed(self, topic: str, payload: dict[str, Any] | str, retain: bool = False) -> None:
-        """Deliver a message to the relay. A dict is JSON-encoded; a str is sent verbatim."""
-        text = payload if isinstance(payload, str) else dumps(payload)
+    def feed(self, topic: str, payload: dict[str, Any], retain: bool = False) -> None:
+        """Deliver a JSON message to the relay."""
         # Only what the relay reads of an aiomqtt Message.
-        self._incoming.put_nowait(SimpleNamespace(topic=topic, payload=text.encode(), retain=retain))
+        self._incoming.put_nowait(SimpleNamespace(topic=topic, payload=dumps(payload).encode(), retain=retain))
 
     def published(self, topic: str) -> list[Message]:
         """Every message published to one topic, oldest first."""

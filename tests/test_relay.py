@@ -1,6 +1,6 @@
 """The MQTT relay, driven by the offline websocket, REST and MQTT fakes."""
 
-from asyncio import CancelledError, Event, Task, create_task, sleep, wait_for
+from asyncio import CancelledError, Event, Task, create_task, get_running_loop, sleep, wait_for
 from contextlib import suppress
 from copy import deepcopy
 from datetime import date, datetime, time, timedelta
@@ -95,8 +95,8 @@ class TestTransactionStore:
         assert store.start_date(EVSE_ID) == date.today() - timedelta(days=12)
 
     def test_never_rescans_what_was_forgotten(self):
-        # A session 28 days ago rescans from 30 days ago, but what is older than 28 days was pruned:
-        # fetching it again would publish it a second time.
+        # A session that ended 28 days ago rescans from 30 days ago, but what ended more than 28 days
+        # ago was pruned: fetching it again would publish it a second time.
         store = TransactionStore(lookback_days=28, rescan_days=2)
         store.add(EVSE_ID, 1, datetime.now() - timedelta(days=28))
         assert store.start_date(EVSE_ID) == date.today() - timedelta(days=28)
@@ -159,9 +159,7 @@ class TestStatus:
         monkeypatch.setattr(BlueCurrentClient, "connected", property(lambda self: False))
         assert await relay._read_statuses() == ([], "disconnected")
 
-    async def test_a_changed_activity_triggers_a_refresh(
-        self, relay: _Relay, fake_socket: FakeSocket, fake_rest: FakeRest, fake_mqtt: FakeMqtt
-    ):
+    async def test_a_changed_activity_triggers_a_refresh(self, relay: _Relay):
         relay._note_activity(EVSE_ID, {"socket_id": 1, "activity": "available"})
         assert not relay.refresh_settings.is_set()  # the first reading is not a change
         relay._note_activity(EVSE_ID, {"socket_id": 1, "activity": "charging"})
@@ -219,9 +217,8 @@ class TestGrid:
 
 class TestTransactions:
     async def test_publishes_each_transaction_once(
-        self, relay: _Relay, fake_socket: FakeSocket, fake_rest: FakeRest, fake_mqtt: FakeMqtt, settings: Settings
+        self, relay: _Relay, fake_rest: FakeRest, fake_mqtt: FakeMqtt, settings: Settings
     ):
-        fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
         fake_rest.on("gettransactions", load_fixture("transactions"))
         await relay._sync_charge_point(EVSE_ID)
         published = fake_mqtt.published(settings.transactions_topic(EVSE_ID))
@@ -238,6 +235,20 @@ class TestTransactions:
         fake_rest.on("gettransactions", {"error": "nope"}, 500)
         await relay._sync_charge_point(EVSE_ID)  # must not raise
         assert not fake_mqtt.published(settings.transactions_topic(EVSE_ID))
+
+    async def test_remembers_a_session_by_its_end_day(
+        self, offline_client: BlueCurrentClient, fake_rest: FakeRest, fake_mqtt: FakeMqtt, settings: Settings
+    ):
+        # The backend selects by end day, so the store counts in end days too. Otherwise an overnight
+        # session on the horizon is pruned, fetched again and republished.
+        response = deepcopy(load_fixture("transactions"))
+        overnight = response["data"]["transactions"][0]
+        overnight.update(started_at="01-07-2026 22:00:00", end_time="02-07-2026 07:00:00")
+        response["data"]["transactions"] = [overnight]
+        fake_rest.on("gettransactions", response)
+        relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore(lookback_days=0, rescan_days=0))
+        await relay._sync_charge_point(EVSE_ID)
+        assert relay.store.start_date(EVSE_ID) == date(2026, 7, 2)
 
     async def test_an_ongoing_session_waits_until_it_has_ended(
         self, relay: _Relay, fake_rest: FakeRest, fake_mqtt: FakeMqtt, settings: Settings
@@ -272,6 +283,9 @@ class TestTransactions:
         assert "duration" not in _with_duration({"started_at": None, "end_time": datetime(2026, 9, 1)})
         both = _with_duration({"started_at": datetime(2026, 9, 1, 10), "end_time": datetime(2026, 9, 1, 11)})
         assert both["duration"] == 3600
+        # Overnight into the end of summer time: 22:00 to 07:00 Dutch time is ten hours, not nine.
+        autumn = _with_duration({"started_at": datetime(2026, 10, 24, 22), "end_time": datetime(2026, 10, 25, 7)})
+        assert autumn["duration"] == 10 * 3600
 
 
 SET_CARD_REPLY = "STATUS_SET_PLUG_AND_CHARGE_CHARGE_CARD"
@@ -395,6 +409,26 @@ class TestServe:
         with raises(MqttError):
             await wait_for(_serve(offline_client, settings, TransactionStore(), Event()), 2)
 
+    async def test_a_broker_error_on_a_live_connection_still_says_down(
+        self, offline_client: BlueCurrentClient, fake_mqtt: FakeMqtt, monkeypatch, settings: Settings
+    ):
+        # A timed-out publish raises MqttError while the connection lives; closing it cleanly then
+        # cancels the Will, so only the relay itself can replace the retained "up".
+        publish = fake_mqtt.publish
+        failures = [MqttError("Operation timed out")]
+
+        async def fails_once(*args, **kwargs):
+            if failures:
+                raise failures.pop()
+            await publish(*args, **kwargs)
+
+        monkeypatch.setattr(fake_mqtt, "publish", fails_once)
+        monkeypatch.setattr("pybluecurrent.relay.relay.MqttClient", make_fake_mqtt(fake_mqtt))
+        with raises(MqttError):
+            await wait_for(_serve(offline_client, settings, TransactionStore(), Event()), 2)
+        health = fake_mqtt.last(settings.health_topic)
+        assert health.payload["status"] == "down" and health.payload["error"] == "MqttError" and health.retain
+
 
 class TestRun:
     """The outer loop: one backend session, however often the broker comes and goes."""
@@ -464,25 +498,7 @@ class TestRun:
         await _wait_until(lambda: "Giving up" in caplog.text)
         raise_signal(SIGTERM)
         assert await wait_for(task, 2) is None  # not the login error: it was asked to stop
-
-    async def test_transactions_are_not_republished_after_a_broker_outage(
-        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest, monkeypatch
-    ):
-        # The store lives with the relay, not with the MQTT connection, or every broker blip would
-        # replay the whole lookback window onto an event topic.
-        fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
-        fake_rest.on("gettransactions", load_fixture("transactions"))
-        mqtt = FakeMqtt()
-        monkeypatch.setattr("pybluecurrent.relay.relay.MqttClient", make_fake_mqtt(mqtt))
-        settings = Settings(sync_transactions=True)
-        store = TransactionStore()
-
-        for _ in range(2):  # two relays, as after a reconnect; one store
-            relay = _Relay(offline_client, mqtt, settings, store)
-            await relay._sync_charge_point(EVSE_ID)
-
-        topic = settings.transactions_topic(EVSE_ID)
-        assert len(mqtt.published(topic)) == len(load_fixture("transactions")["data"]["transactions"])
+        assert not get_running_loop().remove_signal_handler(SIGTERM)  # the relay gave it back
 
 
 class TestCli:
