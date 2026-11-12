@@ -1,4 +1,4 @@
-"""The relay: publish what the BlueCurrent backend reports to an MQTT broker."""
+"""The relay: publish what the BlueCurrent backend reports to an MQTT broker, and run its commands."""
 
 from asyncio import FIRST_COMPLETED, CancelledError, Event, Task, create_task, get_running_loop, sleep, wait, wait_for
 from asyncio import TimeoutError as AsyncTimeoutError
@@ -15,6 +15,7 @@ from aiomqtt import MqttError, Will
 from pybluecurrent.client import BlueCurrentClient
 from pybluecurrent.exceptions import BlueCurrentException
 from pybluecurrent.models import ChargePointStatus
+from pybluecurrent.relay.commands import run_command
 from pybluecurrent.relay.serialize import encode
 from pybluecurrent.relay.settings import Settings
 from pybluecurrent.relay.state import TransactionStore
@@ -22,7 +23,16 @@ from pybluecurrent.relay.state import TransactionStore
 logger = getLogger(__name__)
 
 # Message types the relay knows. Any other type is logged once: the backend may offer something new.
-_EXPECTED_MESSAGES = ("GRID_CURRENT", "GRID_STATUS", "HELLO", "CHARGE_POINTS", "CH_SETTINGS", "CH_STATUS", "ERROR")
+_EXPECTED_MESSAGES = (
+    "GRID_CURRENT",
+    "GRID_STATUS",
+    "HELLO",
+    "CHARGE_POINTS",
+    "CH_SETTINGS",
+    "CH_STATUS",
+    "ERROR",
+    "STATUS_SET_PLUG_AND_CHARGE_CHARGE_CARD",
+)
 
 
 async def run(settings: Settings) -> None:
@@ -153,6 +163,7 @@ class _Relay:
             create_task(self._poll_settings(), name="settings poller"),
             create_task(self._follow_grid(), name="grid feed"),
             create_task(self._heartbeat(), name="heartbeat"),
+            create_task(self._follow_commands(), name="command listener"),
         ]
         if self.settings.sync_transactions:
             tasks.append(create_task(self._sync_transactions(), name="transaction syncer"))
@@ -180,7 +191,7 @@ class _Relay:
             for evse_id, status in statuses:
                 await self.publish(self.settings.status_topic(evse_id, status["socket_id"]), status)
                 self._note_activity(evse_id, status)
-            await self.publish_health("up") if failure is None else await self.publish_health("down", error=failure)
+            await self.publish_health("up" if failure is None else "down", error=failure)
             await sleep(max(1.0, self.settings.poll_interval - (monotonic() - started)))
 
     async def _read_statuses(self) -> tuple[list[tuple[str, ChargePointStatus]], str | None]:
@@ -290,6 +301,23 @@ class _Relay:
         if published:
             logger.info("Published %s new transactions for %s", published, evse_id)
 
+    async def _follow_commands(self) -> None:
+        """Run each command from the command topic and publish its answer.
+
+        One at a time, so two quick commands take effect in the order they were sent.
+        """
+        granted = await self.mqtt.subscribe(self.settings.command_topic, qos=self.settings.mqtt_qos)
+        if 128 in granted:  # MQTT 3.1.1's code for a refused subscription; aiomqtt does not raise
+            logger.error("The broker refused the subscription to %s: no command arrives", self.settings.command_topic)
+        async for message in self.mqtt.messages:
+            if message.retain:
+                continue  # stored on the broker: stale, and it would run again on every reconnect
+            answer = await run_command(self.client, message.payload)
+            logger.info("Command %s for %s: %s", answer["command"], answer["evse_id"], answer["status"])
+            await self.publish(self.settings.ack_topic, answer, retain=False)
+            if answer["status"] == "ok":
+                self.refresh_settings.set()
+
     async def _heartbeat(self) -> None:
         """Repeat the last verdict, so a consumer can tell a living relay from a retained message."""
         while True:
@@ -298,11 +326,11 @@ class _Relay:
 
 
 def _with_duration(transaction: Mapping[str, Any]) -> dict[str, Any]:
-    """The transaction with how long the session lasted, in seconds, when both of its ends are known."""
-    started_at, end_time = transaction.get("started_at"), transaction.get("end_time")
-    if started_at is None or end_time is None:
+    """The finished transaction with how long the session lasted, in seconds, when its start is known."""
+    started_at = transaction.get("started_at")
+    if started_at is None:
         return dict(transaction)
-    return {**transaction, "duration": (end_time - started_at).total_seconds()}
+    return {**transaction, "duration": (transaction["end_time"] - started_at).total_seconds()}
 
 
 def _stop_on_signals(stopping: Event) -> None:

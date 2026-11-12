@@ -4,12 +4,14 @@ Patch it in with::
 
     monkeypatch.setattr("pybluecurrent.relay.relay.MqttClient", make_fake_mqtt(fake_mqtt))
 
-The relay only connects, publishes and (later) subscribes, so :class:`FakeMqtt` duck-types that
-much, recording every message so a test can assert what was published, to which topic, and how.
+The relay only connects, publishes and subscribes, so :class:`FakeMqtt` duck-types that much. It
+records every message published (``sent``) and delivers what a test ``feed``s to ``messages``.
 """
 
-from json import loads
-from typing import Any, Callable
+from asyncio import Queue
+from json import dumps, loads
+from types import SimpleNamespace
+from typing import Any, AsyncIterator, Callable
 
 
 class Message:
@@ -29,10 +31,12 @@ class FakeMqtt:
     """Duck-typed stand-in for ``aiomqtt.Client``."""
 
     def __init__(self, fail_on_connect: BaseException | None = None) -> None:
-        self.messages: list[Message] = []
+        self.sent: list[Message] = []
         self.connections = 0
         self.fail_on_connect = fail_on_connect
         self.will: Any = None  # the Will of the last connection
+        self.subscriptions: list[tuple[str, int]] = []
+        self._incoming: Queue[SimpleNamespace] = Queue()
 
     async def __aenter__(self) -> "FakeMqtt":
         if self.fail_on_connect is not None:
@@ -47,20 +51,38 @@ class FakeMqtt:
     async def publish(
         self, topic: str, payload: str, qos: int = 0, retain: bool = False, timeout: float | None = None
     ) -> None:
-        self.messages.append(Message(topic, payload, qos, retain))
+        self.sent.append(Message(topic, payload, qos, retain))
+
+    async def subscribe(self, topic: str, qos: int = 0, timeout: float | None = None) -> tuple[int, ...]:
+        self.subscriptions.append((topic, qos))
+        return (qos,)  # the granted QoS, as a broker answers
+
+    @property
+    def messages(self) -> AsyncIterator[SimpleNamespace]:
+        return self._deliver()
+
+    async def _deliver(self) -> AsyncIterator[SimpleNamespace]:
+        while True:
+            yield await self._incoming.get()
+
+    def feed(self, topic: str, payload: dict[str, Any] | str, retain: bool = False) -> None:
+        """Deliver a message to the relay. A dict is JSON-encoded; a str is sent verbatim."""
+        text = payload if isinstance(payload, str) else dumps(payload)
+        # Only what the relay reads of an aiomqtt Message.
+        self._incoming.put_nowait(SimpleNamespace(topic=topic, payload=text.encode(), retain=retain))
 
     def published(self, topic: str) -> list[Message]:
         """Every message published to one topic, oldest first."""
-        return [message for message in self.messages if message.topic == topic]
+        return [message for message in self.sent if message.topic == topic]
 
     def last(self, topic: str) -> Message:
         """The most recent message on a topic; fails the test when there is none."""
         published = self.published(topic)
-        assert published, f"nothing was published to {topic}; topics seen: {sorted({m.topic for m in self.messages})}"
+        assert published, f"nothing was published to {topic}; topics seen: {sorted({m.topic for m in self.sent})}"
         return published[-1]
 
     def topics(self) -> set[str]:
-        return {message.topic for message in self.messages}
+        return {message.topic for message in self.sent}
 
 
 def make_fake_mqtt(mqtt: FakeMqtt) -> Callable[..., FakeMqtt]:

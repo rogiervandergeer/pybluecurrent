@@ -110,7 +110,7 @@ or from the matching `--username` / `--password` / `--api-token` options.
 ### MQTT relay
 
 `pybluecurrent relay` publishes what your charge points report to an MQTT broker, for a dashboard or
-a home automation system to read. It needs the `mqtt` extra:
+a home automation system to read, and runs the commands it receives there. It needs the `mqtt` extra:
 
 ```shell
 pip install "pybluecurrent[mqtt]"
@@ -136,6 +136,26 @@ Every option can also be set through an environment variable: `MQTT_HOST`, `MQTT
 `MQTT_USERNAME`, `MQTT_PASSWORD`, `MQTT_CLIENT_ID`, `MQTT_QOS`, `MQTT_TOPIC_PREFIX`, `POLL_INTERVAL`,
 `SETTINGS_INTERVAL`, `SYNC_TRANSACTIONS`, `TRANSACTION_LOOKBACK_DAYS`, `TRANSACTION_RESCAN_DAYS`,
 `TRANSACTION_STATE_FILE` and `BLUECURRENT_DEBUG`. Run `pybluecurrent relay --help` for the details.
+
+To change a setting, publish a JSON command to `bluecurrent/command`. The answer comes on
+`bluecurrent/command/ack` (not retained), with the `id`, `command` and `evse_id` you sent, `status`
+`ok` or `error`, and the `error` when there is one. Commands run one at a time, in the order they
+arrive, so a command that waits for the backend (up to two minutes during an outage) holds back the
+next one. A command sent while the relay is down is lost and gets no answer, so give anything that
+waits for the answer a timeout. Don't publish commands with retain: the relay ignores a retained
+command after a reconnect.
+
+| Command | Arguments | Effect |
+|---|---|---|
+| `set_card` | `uid`: a card's UID, or `null` for no card | sets the plug-and-charge card |
+
+```shell
+mosquitto_pub -h broker.example.com -t bluecurrent/command \
+  -m '{"command": "set_card", "evse_id": "BCU123456", "uid": null, "id": "1"}'
+```
+
+Anyone who can publish to `bluecurrent/command` can change your charge point, so limit that with
+your broker's access control.
 
 The backend reports times without a timezone; the relay reads them as Dutch time (Europe/Amsterdam)
 and publishes them in UTC, whatever timezone it runs in.

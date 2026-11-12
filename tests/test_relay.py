@@ -4,7 +4,7 @@ from asyncio import CancelledError, Event, Task, create_task, sleep, wait_for
 from contextlib import suppress
 from copy import deepcopy
 from datetime import date, datetime, time, timedelta
-from json import loads
+from json import dumps, loads
 from logging import INFO
 from pathlib import Path
 from signal import SIGTERM, raise_signal
@@ -15,9 +15,12 @@ from aiomqtt import MqttError
 from fake_mqtt import FakeMqtt, make_fake_mqtt
 from fake_rest import FakeRest, make_fake_async_client
 from fake_socket import FakeSocket, load_fixture, make_fake_connect
-from pytest import fixture, raises
+from pytest import fixture, mark, raises
+from typer.testing import CliRunner
 
 from pybluecurrent import BlueCurrentClient
+from pybluecurrent.cli import app
+from pybluecurrent.relay.commands import run_command
 from pybluecurrent.relay.relay import _Relay, _serve, _with_duration, run
 from pybluecurrent.relay.serialize import encode
 from pybluecurrent.relay.settings import Settings
@@ -26,19 +29,14 @@ from pybluecurrent.relay.state import TransactionStore
 EVSE_ID = "BCU123456"
 
 
-async def _wait_until(predicate, limit: int = 2000) -> None:
-    """Yield control to the event loop until ``predicate()`` holds (or fail after ``limit`` turns)."""
-    for _ in range(limit):
-        if predicate():
-            return
-        await sleep(0)
-    raise AssertionError("condition was not reached")
+async def _wait_until(predicate, timeout: float = 2) -> None:
+    """Yield control to the event loop until ``predicate()`` holds; fail after ``timeout`` seconds."""
 
+    async def poll() -> None:
+        while not predicate():
+            await sleep(0)
 
-async def _forever_until(predicate) -> None:
-    """Yield control until ``predicate()`` holds, without a turn limit (wrap it in a timeout)."""
-    while not predicate():
-        await sleep(0)
+    await wait_for(poll(), timeout)
 
 
 async def _stop(task: Task) -> None:
@@ -209,7 +207,7 @@ class TestGrid:
         fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
         fake_socket.on("GET_GRID_STATUS", load_fixture("grid_status"))
         task = create_task(relay._follow_grid())
-        await _wait_until(lambda: len(fake_mqtt.messages) > 0)
+        await _wait_until(lambda: len(fake_mqtt.sent) > 0)
         fake_socket.feed({"object": "SOMETHING_NEW"})
         fake_socket.feed({"object": "SOMETHING_NEW"})
         # Queued behind both, so seeing this one means both were handled.
@@ -265,45 +263,107 @@ class TestTransactions:
         fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
         fake_rest.on("gettransactions", {"error": "nope"}, 500)
         task = create_task(relay._sync_transactions())
-        await wait_for(_forever_until(lambda: len(fake_rest.requests) > 0), 2)
+        await _wait_until(lambda: len(fake_rest.requests) > 0)
         fake_rest.on("gettransactions", load_fixture("transactions"))  # without a new activity change
-        await wait_for(_forever_until(lambda: settings.transactions_topic(EVSE_ID) in fake_mqtt.topics()), 2)
+        await _wait_until(lambda: settings.transactions_topic(EVSE_ID) in fake_mqtt.topics())
         await _stop(task)
 
-    def test_duration_needs_both_ends(self):
-        assert "duration" not in _with_duration({"started_at": datetime(2026, 9, 1), "end_time": None})
+    def test_duration_needs_the_start(self):
+        assert "duration" not in _with_duration({"started_at": None, "end_time": datetime(2026, 9, 1)})
         both = _with_duration({"started_at": datetime(2026, 9, 1, 10), "end_time": datetime(2026, 9, 1, 11)})
         assert both["duration"] == 3600
 
 
+SET_CARD_REPLY = "STATUS_SET_PLUG_AND_CHARGE_CHARGE_CARD"
+
+
+def _card_requests(fake_socket: FakeSocket) -> list[dict]:
+    return [message for message in fake_socket.sent if message.get("command") == "SET_PLUG_AND_CHARGE_CHARGE_CARD"]
+
+
+class TestCommands:
+    async def test_sets_the_card(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.on("SET_PLUG_AND_CHARGE_CHARGE_CARD", {"object": SET_CARD_REPLY, "success": True})
+        request = {"command": "set_card", "evse_id": EVSE_ID, "uid": "04D4", "id": "a1"}
+        answer = await run_command(offline_client, dumps(request).encode())
+        assert answer == {"command": "set_card", "id": "a1", "evse_id": EVSE_ID, "status": "ok"}
+        assert _card_requests(fake_socket)[-1]["token_uid"] == "04D4"
+
+    async def test_no_uid_means_no_card(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.on("SET_PLUG_AND_CHARGE_CHARGE_CARD", {"object": SET_CARD_REPLY, "success": True})
+        answer = await run_command(offline_client, dumps({"command": "set_card", "evse_id": EVSE_ID}))
+        assert answer["status"] == "ok"
+        assert _card_requests(fake_socket)[-1]["token_uid"] == "BCU-APP"
+
+    async def test_a_refusal_is_an_error(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
+        fake_socket.on("SET_PLUG_AND_CHARGE_CHARGE_CARD", {"object": SET_CARD_REPLY, "success": False})
+        answer = await run_command(offline_client, dumps({"command": "set_card", "evse_id": EVSE_ID, "uid": "X"}))
+        assert answer["status"] == "error" and answer["error"]
+
+    @mark.parametrize(
+        "request_, error",
+        [
+            ({"command": "fly", "evse_id": EVSE_ID}, "Unknown command"),
+            ({"command": "set_card"}, "evse_id"),
+            ({"command": "set_card", "evse_id": EVSE_ID, "uid": 5}, "uid"),
+            ({"command": "set_card", "evse_id": EVSE_ID, "uid": ""}, "uid"),  # an empty HA text helper
+        ],
+    )
+    async def test_a_bad_request_is_an_error_and_sends_nothing(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, request_: dict, error: str
+    ):
+        answer = await run_command(offline_client, dumps({**request_, "id": "x"}))
+        assert answer["status"] == "error" and error in answer["error"]
+        assert answer["id"] == "x"  # echoed, so the sender can match the answer
+        assert not _card_requests(fake_socket)
+
+    @mark.parametrize("payload", ["{not json", '["set_card"]', b"\xff"])
+    async def test_an_unreadable_request_is_an_error(self, offline_client: BlueCurrentClient, payload):
+        answer = await run_command(offline_client, payload)
+        assert answer["status"] == "error" and answer["id"] is None
+
+    async def test_answers_each_command_and_skips_retained_ones(
+        self, relay: _Relay, fake_socket: FakeSocket, fake_mqtt: FakeMqtt, settings: Settings
+    ):
+        fake_socket.on("SET_PLUG_AND_CHARGE_CHARGE_CARD", {"object": SET_CARD_REPLY, "success": True})
+        task = create_task(relay._follow_commands())
+        fake_mqtt.feed(settings.command_topic, {"command": "set_card", "evse_id": EVSE_ID, "id": "old"}, retain=True)
+        fake_mqtt.feed(settings.command_topic, {"command": "set_card", "evse_id": EVSE_ID, "id": "new"})
+        await _wait_until(lambda: settings.ack_topic in fake_mqtt.topics())
+        await _stop(task)
+
+        assert fake_mqtt.subscriptions == [(settings.command_topic, settings.mqtt_qos)]
+        answers = fake_mqtt.published(settings.ack_topic)
+        assert [answer.payload["id"] for answer in answers] == ["new"]  # the retained one never ran
+        assert answers[0].payload["status"] == "ok" and not answers[0].retain
+        assert len(_card_requests(fake_socket)) == 1
+        assert relay.refresh_settings.is_set()  # so the settings topic shows the new card
+
+    async def test_a_refused_subscription_is_logged(self, relay: _Relay, fake_mqtt: FakeMqtt, monkeypatch, caplog):
+        async def refuse(topic, qos=0, timeout=None):
+            return (128,)
+
+        monkeypatch.setattr(fake_mqtt, "subscribe", refuse)
+        task = create_task(relay._follow_commands())
+        await _wait_until(lambda: "refused" in caplog.text)
+        await _stop(task)
+
+
 class TestHeartbeat:
+    # The last verdict, "down" included: a heartbeat that said "up" through an outage would lie.
+    @mark.parametrize("status, error", [("up", None), ("down", "RequestTimeout")])
     async def test_repeats_the_last_verdict_without_retaining(
-        self, offline_client: BlueCurrentClient, fake_mqtt: FakeMqtt
+        self, offline_client: BlueCurrentClient, fake_mqtt: FakeMqtt, status: str, error: str | None
     ):
         settings = Settings(heartbeat_interval=0.01)
         relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
-        await relay.publish_health("up")
+        await relay.publish_health(status, error=error)
         task = create_task(relay._heartbeat())
-        await wait_for(_forever_until(lambda: len(fake_mqtt.published(settings.health_topic)) > 1), 2)
+        await _wait_until(lambda: len(fake_mqtt.published(settings.health_topic)) > 1)
         await _stop(task)
         heartbeat = fake_mqtt.last(settings.health_topic)
-        # Not retained: a broker must not keep telling new subscribers the relay was alive.
-        assert heartbeat.payload["status"] == "up" and not heartbeat.retain
-
-    async def test_does_not_claim_health_it_does_not_have(self, offline_client: BlueCurrentClient, fake_mqtt: FakeMqtt):
-        # While the backend is unreachable the heartbeat must keep saying so, or a consumer reads
-        # "up" every minute through an outage.
-        settings = Settings(heartbeat_interval=0.01)
-        relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
-        await relay.publish_health("down", error="RequestTimeout")
-        task = create_task(relay._heartbeat())
-        await wait_for(_forever_until(lambda: len(fake_mqtt.published(settings.health_topic)) > 1), 2)
-        await _stop(task)
-        assert fake_mqtt.last(settings.health_topic).payload == {
-            "status": "down",
-            "error": "RequestTimeout",
-            "timestamp": fake_mqtt.last(settings.health_topic).payload["timestamp"],
-        }
+        assert heartbeat.payload["status"] == status and heartbeat.payload.get("error") == error
+        assert not heartbeat.retain  # a broker must not keep telling new subscribers the relay was alive
 
 
 class TestServe:
@@ -339,36 +399,32 @@ class TestServe:
 class TestRun:
     """The outer loop: one backend session, however often the broker comes and goes."""
 
-    async def test_a_broker_outage_does_not_log_in_again(
-        self, monkeypatch, fake_socket: FakeSocket, fake_rest: FakeRest
-    ):
+    @fixture
+    def backend(self, monkeypatch, fake_socket: FakeSocket, fake_rest: FakeRest) -> FakeSocket:
+        """The faked backend, for a run() that builds and logs in its own client."""
         monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
         monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
         fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
         fake_socket.on("GET_GRID_STATUS", load_fixture("grid_status"))
         fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
+        return fake_socket
+
+    async def test_a_broker_outage_does_not_log_in_again(self, monkeypatch, backend: FakeSocket):
         mqtt = FakeMqtt(fail_on_connect=MqttError("connection refused"))
         monkeypatch.setattr("pybluecurrent.relay.relay.MqttClient", make_fake_mqtt(mqtt))
         settings = Settings(username="username", password="password", mqtt_reconnect_interval=0.01)
 
         task = create_task(run(settings))
-        await wait_for(_forever_until(lambda: settings.health_topic in mqtt.topics()), 5)
+        await _wait_until(lambda: settings.health_topic in mqtt.topics(), 5)
         raise_signal(SIGTERM)
         await wait_for(task, 5)
 
         assert mqtt.connections == 1  # the first attempt was refused, the second connected
-        logins = [message for message in fake_socket.sent if message.get("command") == "VALIDATE_PASSWORD"]
+        logins = [message for message in backend.sent if message.get("command") == "VALIDATE_PASSWORD"]
         assert len(logins) == 1  # the broker outage cost no backend login
         assert mqtt.last(settings.health_topic).payload["error"] == "shutdown"
 
-    async def test_an_unexpected_error_starts_over_without_a_login(
-        self, monkeypatch, fake_socket: FakeSocket, fake_rest: FakeRest
-    ):
-        monkeypatch.setattr("pybluecurrent.client.connect", make_fake_connect(fake_socket))
-        monkeypatch.setattr("pybluecurrent.client.AsyncClient", make_fake_async_client(fake_rest))
-        fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
-        fake_socket.on("GET_GRID_STATUS", load_fixture("grid_status"))
-        fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
+    async def test_an_unexpected_error_starts_over_without_a_login(self, monkeypatch, backend: FakeSocket):
         mqtt = FakeMqtt()
         monkeypatch.setattr("pybluecurrent.relay.relay.MqttClient", make_fake_mqtt(mqtt))
         original = _Relay._note_activity
@@ -383,12 +439,14 @@ class TestRun:
         monkeypatch.setattr(_Relay, "_note_activity", fails_once)
         settings = Settings(username="username", password="password", mqtt_reconnect_interval=0.01)
         task = create_task(run(settings))
-        await wait_for(_forever_until(lambda: mqtt.connections == 2), 5)
+        # Subscribed once per connection: the command listener comes back with the relay.
+        await _wait_until(lambda: len(mqtt.subscriptions) == 2, 5)
         raise_signal(SIGTERM)
         await wait_for(task, 5)
 
+        assert mqtt.connections == 2
         assert any(message.payload.get("error") == "KeyError" for message in mqtt.published(settings.health_topic))
-        logins = [message for message in fake_socket.sent if message.get("command") == "VALIDATE_PASSWORD"]
+        logins = [message for message in backend.sent if message.get("command") == "VALIDATE_PASSWORD"]
         assert len(logins) == 1
 
     async def test_a_failed_login_waits_before_it_gives_up(self, monkeypatch):
@@ -403,7 +461,7 @@ class TestRun:
     async def test_stopping_while_it_waits_is_a_clean_exit(self, monkeypatch, caplog):
         monkeypatch.setattr("pybluecurrent.client.connect", lambda *args, **kwargs: _Refused())
         task = create_task(run(Settings(username="username", password="password")))
-        await wait_for(_forever_until(lambda: "Giving up" in caplog.text), 2)
+        await _wait_until(lambda: "Giving up" in caplog.text)
         raise_signal(SIGTERM)
         assert await wait_for(task, 2) is None  # not the login error: it was asked to stop
 
@@ -429,28 +487,16 @@ class TestRun:
 
 class TestCli:
     def test_relay_is_a_subcommand(self):
-        from typer.testing import CliRunner
-
-        from pybluecurrent.cli import app
-
         # The names, not the rendered help: how that looks depends on the terminal it is drawn for.
         assert "relay" in {command.callback.__name__ for command in app.registered_commands if command.callback}
         assert CliRunner().invoke(app, ["relay", "--help"]).exit_code == 0
 
     def test_missing_credentials_are_a_usage_error(self):
-        from typer.testing import CliRunner
-
-        from pybluecurrent.cli import app
-
         env = {"BLUECURRENT_USERNAME": None, "BLUECURRENT_PASSWORD": None, "BLUECURRENT_API_TOKEN": None}
         result = CliRunner().invoke(app, ["relay"], env=env)
         assert result.exit_code == 2 and "BLUECURRENT_API_TOKEN" in result.output
 
     def test_without_the_extra_it_says_what_to_install(self, monkeypatch):
-        from typer.testing import CliRunner
-
-        from pybluecurrent.cli import app
-
         for name in [name for name in modules if name.startswith("pybluecurrent.relay")]:
             monkeypatch.delitem(modules, name)
         monkeypatch.setitem(modules, "aiomqtt", None)  # as if it was never installed
@@ -475,3 +521,5 @@ def test_topics():
     assert settings.grid_topic("BCU1") == "p/BCU1/grid"
     assert settings.transactions_topic("BCU1") == "p/BCU1/transactions"
     assert settings.health_topic == "p/backend_health"
+    assert settings.command_topic == "p/command"
+    assert settings.ack_topic == "p/command/ack"

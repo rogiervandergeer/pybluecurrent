@@ -3,7 +3,6 @@
 from datetime import date, datetime, timedelta
 from json import dumps, loads
 from logging import getLogger
-from os import replace
 from pathlib import Path
 
 logger = getLogger(__name__)
@@ -53,16 +52,11 @@ class TransactionStore:
         if self.path is None:
             return
         self._prune()
-        data = {
-            evse_id: {
-                str(transaction_id): day.isoformat() if day else None for transaction_id, day in published.items()
-            }
-            for evse_id, published in self._published.items()
-        }
         temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
         try:
-            temporary.write_text(dumps(data))
-            replace(temporary, self.path)
+            # json turns the int ids into strings, and str() renders a date as ISO 8601.
+            temporary.write_text(dumps(self._published, default=str))
+            temporary.replace(self.path)
         except OSError as error:
             logger.error("Could not write the transaction state file: %s", error)
 

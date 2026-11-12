@@ -43,7 +43,7 @@ def relay(
     api_token: Annotated[str | None, Option(envvar="BLUECURRENT_API_TOKEN")] = None,
     debug: Annotated[bool, Option(envvar="BLUECURRENT_DEBUG", help="Log every message exchanged.")] = False,
 ) -> None:
-    """Publish charge point status, settings and grid current to MQTT, until stopped."""
+    """Publish charge point status, settings and grid current to MQTT, and take commands, until stopped."""
     try:
         from pybluecurrent.relay import Settings, run
     except ImportError as error:

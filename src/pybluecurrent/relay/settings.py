@@ -46,3 +46,11 @@ class Settings:
     @property
     def health_topic(self) -> str:
         return f"{self.topic_prefix}/backend_health"
+
+    @property
+    def command_topic(self) -> str:
+        return f"{self.topic_prefix}/command"
+
+    @property
+    def ack_topic(self) -> str:
+        return f"{self.topic_prefix}/command/ack"

@@ -11,18 +11,14 @@ from pybluecurrent.utilities import format_time
 BACKEND_TIMEZONE = ZoneInfo("Europe/Amsterdam")
 
 
-def now() -> str:
-    """The current time, as the relay stamps its messages: UTC, ISO 8601, with an offset."""
-    return datetime.now(timezone.utc).isoformat()
-
-
 def encode(payload: Mapping[str, Any]) -> str:
-    """Render a message as JSON, with a "timestamp" of its own added."""
-    return dumps({**_convert(payload), "timestamp": now()}, ensure_ascii=False)
+    """Render a message as JSON, with a "timestamp" of its own added: UTC, ISO 8601, with an offset."""
+    message = {**payload, "timestamp": datetime.now(timezone.utc).isoformat()}
+    return dumps(message, ensure_ascii=False, default=_convert)
 
 
-def _convert(value: Any) -> Any:
-    """Render dates, datetimes and times as strings, recursing into nested values.
+def _convert(value: Any) -> str:
+    """Render a date, datetime or time, wherever json meets one.
 
     Naive datetimes are read as BACKEND_TIMEZONE and rendered as UTC. Times of day stay "HH:MM", the
     format the setters accept.
@@ -35,8 +31,4 @@ def _convert(value: Any) -> Any:
         return value.astimezone(timezone.utc).isoformat()
     if isinstance(value, date):
         return value.isoformat()
-    if isinstance(value, dict):
-        return {key: _convert(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_convert(item) for item in value]
-    return value
+    raise TypeError(f"Cannot render {type(value).__name__} as JSON.")
