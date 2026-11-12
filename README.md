@@ -129,7 +129,7 @@ It publishes, retained, as JSON with a UTC `timestamp`:
 | `bluecurrent/{evse_id}/{socket_id}/status` | the live status of one socket, every `--poll-interval` seconds |
 | `bluecurrent/{evse_id}/settings` | the charge point's settings, including its smart-charging profiles |
 | `bluecurrent/{evse_id}/grid` | the grid current, kept up to date from the backend's own messages |
-| `bluecurrent/{evse_id}/transactions` | one message per charging session (not retained), with `--sync-transactions` |
+| `bluecurrent/{evse_id}/transactions` | one message per finished charging session (not retained), with `--sync-transactions` |
 | `bluecurrent/backend_health` | `up`, or `down` with the error; repeated every minute so its `timestamp` shows the relay is alive |
 
 Every option can also be set through an environment variable: `MQTT_HOST`, `MQTT_PORT`,
@@ -137,14 +137,16 @@ Every option can also be set through an environment variable: `MQTT_HOST`, `MQTT
 `SETTINGS_INTERVAL`, `SYNC_TRANSACTIONS`, `TRANSACTION_LOOKBACK_DAYS`, `TRANSACTION_RESCAN_DAYS`,
 `TRANSACTION_STATE_FILE` and `BLUECURRENT_DEBUG`. Run `pybluecurrent relay --help` for the details.
 
-The backend reports times without a timezone, so run the relay in the timezone of the charge point
-(in a container, set `TZ`); the published timestamps are UTC either way.
+The backend reports times without a timezone; the relay reads them as Dutch time (Europe/Amsterdam)
+and publishes them in UTC, whatever timezone it runs in.
 
 The relay reconnects to the broker by itself, and keeps one backend session across those reconnects.
 It stops on `SIGTERM` after saying it is down, and the broker says so on its behalf if the relay is
-killed instead. It does exit when the backend connection is given up for good — rather than logging
-in over and over, which BlueCurrent would refuse — so give it a restart policy that backs off. A
-charge point that leaves your account keeps its last retained messages, so watch their `timestamp`.
+killed instead (that message has no `timestamp`). It does exit when the login fails or the backend
+connection is given up for good, after waiting five minutes — rather than logging in over and over,
+which BlueCurrent would refuse — so give it a restart policy that backs off. A charge point that
+leaves your account keeps its last retained messages, so watch their `timestamp`. The relay runs on
+Linux and macOS, not on Windows.
 
 ## Methods
 

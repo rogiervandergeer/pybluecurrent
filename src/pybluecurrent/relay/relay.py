@@ -3,6 +3,7 @@
 from asyncio import FIRST_COMPLETED, CancelledError, Event, Task, create_task, get_running_loop, sleep, wait, wait_for
 from asyncio import TimeoutError as AsyncTimeoutError
 from contextlib import aclosing, suppress
+from json import dumps
 from logging import getLogger
 from signal import SIGINT, SIGTERM
 from time import monotonic
@@ -12,7 +13,7 @@ from aiomqtt import Client as MqttClient
 from aiomqtt import MqttError, Will
 
 from pybluecurrent.client import BlueCurrentClient
-from pybluecurrent.exceptions import ConnectionLost
+from pybluecurrent.exceptions import BlueCurrentException
 from pybluecurrent.models import ChargePointStatus
 from pybluecurrent.relay.serialize import encode
 from pybluecurrent.relay.settings import Settings
@@ -20,8 +21,7 @@ from pybluecurrent.relay.state import TransactionStore
 
 logger = getLogger(__name__)
 
-# The message types the relay handles itself; anything else is logged once, as a hint that the
-# backend has something to offer that this version does not publish.
+# Message types the relay knows. Any other type is logged once: the backend may offer something new.
 _EXPECTED_MESSAGES = ("GRID_CURRENT", "GRID_STATUS", "HELLO", "CHARGE_POINTS", "CH_SETTINGS", "CH_STATUS", "ERROR")
 
 
@@ -38,20 +38,28 @@ async def run(settings: Settings) -> None:
     store = TransactionStore(
         settings.transaction_state_file, settings.transaction_lookback_days, settings.transaction_rescan_days
     )
-    async with client:
-        while not stopping.is_set():
-            try:
-                await _serve(client, settings, store, stopping)
-            except MqttError as error:
-                logger.error("MQTT error: %s", error)
+    try:
+        async with client:
+            while not stopping.is_set():
+                try:
+                    await _serve(client, settings, store, stopping)
+                except MqttError as error:
+                    logger.error("MQTT error: %s", error)
+                except BlueCurrentException:
+                    raise  # the client gave up on the backend
+                except Exception:
+                    # Unexpected, e.g. a missing field. Start over: exiting would cost a login.
+                    logger.exception("The relay failed; starting over")
                 await _wait_for(stopping, settings.mqtt_reconnect_interval)
-            except ConnectionLost as error:
-                # The client stopped reconnecting to keep the backend from seeing a burst of logins.
-                # Leaving now would only move the next login to whatever restarts the relay, so wait
-                # the window out first, then let the caller (and its restart policy) take over.
-                logger.error("Giving up on the backend: %s", error)
-                await _wait_for(stopping, client.reconnect_relogin_window)
-                raise
+    except Exception as error:
+        # Login failed or the client gave up. Wait out the relogin window first, so a restart does
+        # not log in again at once.
+        logger.error("Giving up on the backend: %r", error)
+        await _wait_for(stopping, client.reconnect_relogin_window)
+        if not stopping.is_set():
+            raise
+    finally:
+        store.save()
     logger.info("Stopped")
 
 
@@ -63,11 +71,11 @@ async def _serve(client: BlueCurrentClient, settings: Settings, store: Transacti
         username=settings.mqtt_username,
         password=settings.mqtt_password,
         identifier=settings.mqtt_client_id,
-        # What the broker says on the relay's behalf if it never gets to say goodbye itself — killed,
-        # partitioned off, or gone with its node. Without it a retained "up" outlives the relay.
+        # Sent by the broker if the relay dies without a goodbye, so a retained "up" does not outlive
+        # it. No timestamp: it would be the connect time.
         will=Will(
             settings.health_topic,
-            encode({"status": "down", "error": "lost"}),
+            dumps({"status": "down", "error": "lost"}),
             qos=settings.mqtt_qos,
             retain=True,
         ),
@@ -87,18 +95,14 @@ async def _serve(client: BlueCurrentClient, settings: Settings, store: Transacti
         finally:
             await _stop_tasks(tasks)
             if last_word is not None:
-                # The last word on a topic nothing else clears: without it the broker keeps serving
-                # the retained "up" of a relay that is gone.
+                # Replace the retained "up".
                 await relay.publish_health("down", error=last_word, timeout=settings.shutdown_publish_timeout)
 
 
 async def _stop_tasks(tasks: list[Task], timeout: float = 0.5, attempts: int = 4) -> None:
-    """Cancel the tasks and wait for them to end, asking again while any is still running.
+    """Cancel the tasks and wait, cancelling again while any still runs.
 
-    Once is not always enough: on Python 3.10 a cancellation that lands exactly as an awaited call
-    completes can be lost (asyncio.wait_for keeps the result and drops the CancelledError), and the
-    task then carries on as if nothing happened — which would hold up the shutdown until the grace
-    period runs out.
+    On Python 3.10, wait_for can drop a cancellation that lands as its awaited call completes.
     """
     for _ in range(attempts):
         pending = [task for task in tasks if not task.done()]
@@ -180,12 +184,10 @@ class _Relay:
             await sleep(max(1.0, self.settings.poll_interval - (monotonic() - started)))
 
     async def _read_statuses(self) -> tuple[list[tuple[str, ChargePointStatus]], str | None]:
-        """Read every socket of every charge point; report a failure rather than raising it.
-
-        A bad response must not end weeks of uptime, so anything the backend or the network throws
-        is turned into a health verdict — including what no model expects, such as a maintenance
-        page where JSON belongs.
-        """
+        """Read every socket of every charge point. Any exception, even an unexpected one such as an
+        HTML maintenance page, becomes a health verdict instead of a raise."""
+        if not self.client.connected:
+            return [], "disconnected"  # say so now, not after a read has waited out the reconnect
         statuses = []
         try:
             for charge_point in await self.client.get_charge_points():
@@ -230,7 +232,6 @@ class _Relay:
                     grid.update({key: value for key, value in message.items() if key.startswith("grid_")})
                     await self.publish(self.settings.grid_topic(evse_id), grid)
                 elif name and name not in _EXPECTED_MESSAGES and name not in self.unknown_messages:
-                    # Once per type: worth seeing in the log, not worth repeating forever.
                     self.unknown_messages.add(name)
                     logger.info("Received a message type the relay does not publish: %s", name)
 
@@ -249,21 +250,21 @@ class _Relay:
             logger.error("Could not read the grid status: %r", error)
 
     async def _sync_transactions(self) -> None:
-        """Publish transactions that were not published before, on start and after every change."""
-        self.sync_transactions.set()
+        """Publish transactions that were not published before: on start, after every change, and on
+        the settings interval — which retries a failed sync, and catches a session the backend lists
+        only some time after it ended."""
         while True:
-            await self.sync_transactions.wait()
-            self.sync_transactions.clear()
+            self.sync_transactions.clear()  # before reading, so a change during the read is not lost
             try:
-                charge_points = await self.client.get_charge_points()
+                for charge_point in await self.client.get_charge_points():
+                    await self._sync_charge_point(charge_point["evse_id"])
+            except MqttError:
+                raise  # the broker, not the backend
             except Exception as error:
                 logger.error("Could not read the charge points: %r", error)
-                await sleep(self.settings.poll_interval)
-                self.sync_transactions.set()  # try again
-                continue
-            for charge_point in charge_points:
-                await self._sync_charge_point(charge_point["evse_id"])
-            self.store.save()
+            finally:
+                self.store.save()  # also when stopped halfway, or a restart publishes those again
+            await _wait_for(self.sync_transactions, self.settings.settings_interval)
 
     async def _sync_charge_point(self, evse_id: str) -> None:
         published = 0
@@ -273,6 +274,10 @@ class _Relay:
             ):
                 transaction_id = transaction["transaction_id"]
                 if self.store.seen(evse_id, transaction_id):
+                    continue
+                if transaction.get("end_time") is None:
+                    # Still going: it is published once it has ended. Logged, in case one never does.
+                    logger.debug("Transaction %s of %s has not ended yet", transaction_id, evse_id)
                     continue
                 await self.publish(self.settings.transactions_topic(evse_id), _with_duration(transaction), retain=False)
                 self.store.add(evse_id, transaction_id, transaction.get("started_at"))
@@ -301,12 +306,8 @@ def _with_duration(transaction: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _stop_on_signals(stopping: Event) -> None:
-    """Stop on SIGTERM and SIGINT.
-
-    Registered on the running loop rather than with signal.signal: a container runs this as PID 1,
-    where the kernel drops a signal that has no handler installed, so the relay would otherwise poll
-    on through its whole grace period and be killed with a stale "up" retained on the health topic.
-    """
+    """Stop on SIGTERM and SIGINT. SIGTERM needs a handler: as PID 1 in a container, the kernel drops
+    a signal without one, and the relay is killed with a stale "up" retained."""
 
     def stop() -> None:
         logger.info("Stopping")

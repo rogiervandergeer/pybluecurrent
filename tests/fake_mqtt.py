@@ -32,6 +32,7 @@ class FakeMqtt:
         self.messages: list[Message] = []
         self.connections = 0
         self.fail_on_connect = fail_on_connect
+        self.will: Any = None  # the Will of the last connection
 
     async def __aenter__(self) -> "FakeMqtt":
         if self.fail_on_connect is not None:
@@ -66,6 +67,7 @@ def make_fake_mqtt(mqtt: FakeMqtt) -> Callable[..., FakeMqtt]:
     """Build a drop-in replacement for ``aiomqtt.Client`` bound to ``mqtt``."""
 
     def fake_client(*args: Any, **kwargs: Any) -> FakeMqtt:
+        mqtt.will = kwargs.get("will")
         return mqtt
 
     return fake_client

@@ -39,13 +39,14 @@ class TransactionStore:
         session that is already known could still be joined by one that started before it but
         finished later.
         """
+        horizon = self._horizon()
         days = [day for day in self._published.get(evse_id, {}).values() if day is not None]
-        if days:
-            # The backend filters by date, so the overlap is counted in days, not hours.
-            return max(days) - timedelta(days=self.rescan_days)
-        if self.lookback_days <= 0:
-            return None
-        return date.today() - timedelta(days=self.lookback_days)
+        if not days:
+            return horizon
+        # The backend filters by date, so the overlap is counted in days, not hours. Never before the
+        # horizon, though: what is older was forgotten, and fetching it again would republish it.
+        start = max(days) - timedelta(days=self.rescan_days)
+        return start if horizon is None else max(start, horizon)
 
     def save(self) -> None:
         """Write the store, if it has a path: to a temporary file first, so a crash cannot truncate it."""
@@ -66,14 +67,18 @@ class TransactionStore:
             logger.error("Could not write the transaction state file: %s", error)
 
     def _prune(self) -> None:
-        """Forget what is older than the scan window: it can never be fetched, so never republished."""
-        if self.lookback_days <= 0:
+        """Forget what is older than the horizon: start_date never reaches back that far again."""
+        horizon = self._horizon()
+        if horizon is None:
             return
-        horizon = date.today() - timedelta(days=self.lookback_days)
         for published in self._published.values():
             for transaction_id, day in list(published.items()):
                 if day is not None and day < horizon:
                     del published[transaction_id]
+
+    def _horizon(self) -> date | None:
+        """The oldest day ever scanned, or None when the whole history is."""
+        return date.today() - timedelta(days=self.lookback_days) if self.lookback_days > 0 else None
 
     def _load(self) -> None:
         if self.path is None or not self.path.exists():

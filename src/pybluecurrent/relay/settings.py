@@ -25,9 +25,8 @@ class Settings:
     transaction_rescan_days: int = 2
     transaction_state_file: Path | None = None
 
-    # Not configurable: the heartbeat the health topic is read by, the wait between MQTT reconnects,
-    # and the budget for the last message on the way out (the rest of the grace period is needed to
-    # close the connections).
+    # Not on the command line. shutdown_publish_timeout leaves the rest of the grace period for closing
+    # the connections.
     heartbeat_interval: float = 60.0
     mqtt_reconnect_interval: float = 30.0
     shutdown_publish_timeout: float = 5.0

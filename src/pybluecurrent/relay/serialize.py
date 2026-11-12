@@ -3,8 +3,12 @@
 from datetime import date, datetime, time, timezone
 from json import dumps
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from pybluecurrent.utilities import format_time
+
+# The backend's datetimes carry no timezone. As far as we know they are always Dutch time.
+BACKEND_TIMEZONE = ZoneInfo("Europe/Amsterdam")
 
 
 def now() -> str:
@@ -20,13 +24,14 @@ def encode(payload: Mapping[str, Any]) -> str:
 def _convert(value: Any) -> Any:
     """Render dates, datetimes and times as strings, recursing into nested values.
 
-    The backend's datetimes are naive local times, so they are read in the timezone the relay runs
-    in — run it where the charge point is — and rendered as UTC with an offset, which every consumer
-    can parse without knowing that. Times of day stay "HH:MM", the format the setters accept.
+    Naive datetimes are read as BACKEND_TIMEZONE and rendered as UTC. Times of day stay "HH:MM", the
+    format the setters accept.
     """
     if isinstance(value, time):
         return format_time(value)
     if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=BACKEND_TIMEZONE)
         return value.astimezone(timezone.utc).isoformat()
     if isinstance(value, date):
         return value.isoformat()

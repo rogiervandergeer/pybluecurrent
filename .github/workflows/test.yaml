@@ -21,8 +21,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install Dependencies
-        # Into a virtual environment, because ty resolves imports from the project's environment: on
-        # a bare interpreter it finds none, and every third-party import reads as unresolved.
+        # A venv: ty resolves imports from the project's environment, and finds none on a bare interpreter.
         run: |
           python3 -m venv .venv
           .venv/bin/pip install -e ".[dev,mqtt]"
