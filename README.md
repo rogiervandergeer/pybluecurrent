@@ -127,7 +127,7 @@ It publishes, retained, as JSON with a UTC `timestamp`:
 | Topic | Contents |
 |---|---|
 | `bluecurrent/{evse_id}/{socket_id}/status` | the live status of one socket, every `--poll-interval` seconds |
-| `bluecurrent/{evse_id}/settings` | the charge point's settings, including its smart-charging profiles |
+| `bluecurrent/{evse_id}/settings` | the charge point's settings, including its smart-charging profiles; read again when a socket's activity changes, after every command, and every `--settings-interval` seconds (an hour) for changes made in the app |
 | `bluecurrent/{evse_id}/grid` | the grid current, kept up to date from the backend's own messages |
 | `bluecurrent/{evse_id}/transactions` | one message per finished charging session (not retained), with `--sync-transactions` |
 | `bluecurrent/backend_health` | `up`, or `down` with the error; repeated every minute so its `timestamp` shows the relay is alive |

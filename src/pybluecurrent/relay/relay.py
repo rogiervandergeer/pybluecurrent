@@ -28,8 +28,6 @@ _EXPECTED_MESSAGES = (
     "GRID_STATUS",
     "HELLO",
     "CHARGE_POINTS",
-    "CH_SETTINGS",
-    "CH_STATUS",
     "ERROR",
     "STATUS_SET_PLUG_AND_CHARGE_CHARGE_CARD",
 )
@@ -152,6 +150,10 @@ class _Relay:
         self.mqtt = mqtt
         self.settings = settings
         self.store = store
+        # The charge points, as the settings loop last read them. The other tasks use these ids
+        # rather than asking the backend again: every ask is a websocket request.
+        self.evse_ids: list[str] = []
+        self.charge_points_known = Event()
         self.activity: dict[tuple[str, int], str] = {}
         self.grid: dict[str, dict[str, Any]] = {}
         self.health: dict[str, Any] = {"status": "down", "error": "starting"}
@@ -201,10 +203,12 @@ class _Relay:
         HTML maintenance page, becomes a health verdict instead of a raise."""
         if not self.client.connected:
             return [], "disconnected"  # say so now, not after a read has waited out the reconnect
+        await _wait_for(self.charge_points_known, self.settings.poll_interval)
+        if not self.charge_points_known.is_set():
+            return [], "no charge points yet"
         statuses = []
         try:
-            for charge_point in await self.client.get_charge_points():
-                evse_id = charge_point["evse_id"]
+            for evse_id in self.evse_ids:
                 statuses += [(evse_id, status) for status in await self.client.get_charge_point_statuses(evse_id)]
         except Exception as error:
             logger.error("Could not read the charge points: %r", error)
@@ -222,59 +226,67 @@ class _Relay:
         self.activity[key] = activity
 
     async def _poll_settings(self) -> None:
-        """Publish each charge point's settings, refreshed on a change and on a slow interval."""
+        """Publish each charge point's settings, refreshed on a change and on a slow interval, and
+        keep the charge point ids the other tasks use."""
         while True:
             self.refresh_settings.clear()  # before reading, so a change during the read is not lost
             try:
                 charge_points = await self.client.get_charge_points()
             except Exception as error:
                 logger.error("Could not read the charge point settings: %r", error)
-                charge_points = []
-            for charge_point in charge_points:
-                await self.publish(self.settings.settings_topic(charge_point["evse_id"]), charge_point)
-            await _wait_for(self.refresh_settings, self.settings.settings_interval)
+            else:
+                self.evse_ids = [charge_point["evse_id"] for charge_point in charge_points]
+                self.charge_points_known.set()
+                for charge_point in charge_points:
+                    await self.publish(self.settings.settings_topic(charge_point["evse_id"]), charge_point)
+                for evse_id in self.evse_ids:
+                    if evse_id not in self.grid:  # once per charge point; a failed fetch is tried again
+                        await self._fetch_grid(evse_id)
+            # Until the first read succeeds the other tasks wait for it, so try again soon.
+            interval = self.settings.settings_interval
+            if not self.charge_points_known.is_set():
+                interval = self.settings.poll_interval
+            await _wait_for(self.refresh_settings, interval)
 
     async def _follow_grid(self) -> None:
-        """Publish the grid status: fetched once per charge point, then kept current from the messages."""
-        await self._prime_grid()
+        """Keep the grid status current from the backend's messages, once it was fetched in full.
+
+        Reads the messages from the start, without waiting for anything: this is where the client
+        giving up on the backend comes out, and that must end the relay.
+        """
         async with aclosing(self.client.live_updates()) as updates:
             async for message in updates:
-                name, evse_id = message.get("object"), message.get("evse_id")
-                if name == "GRID_CURRENT" and isinstance(evse_id, str):
-                    grid = self.grid.setdefault(evse_id, {"evse_id": evse_id})
-                    grid.update({key: value for key, value in message.items() if key.startswith("grid_")})
-                    await self.publish(self.settings.grid_topic(evse_id), grid)
+                name = message.get("object")
+                if name == "GRID_CURRENT":
+                    grid = self.grid.get(message.get("evse_id"))
+                    if grid is not None:  # before the full fetch, which includes these values, skip it
+                        grid.update({key: value for key, value in message.items() if key.startswith("grid_")})
+                        await self.publish(self.settings.grid_topic(grid["evse_id"]), grid)
                 elif name and name not in _EXPECTED_MESSAGES and name not in self.unknown_messages:
                     self.unknown_messages.add(name)
                     logger.info("Received a message type the relay does not publish: %s", name)
 
-    async def _prime_grid(self) -> None:
+    async def _fetch_grid(self, evse_id: str) -> None:
         """Fetch the full grid status, of which the messages only update the actual currents."""
         try:
-            for charge_point in await self.client.get_charge_points():
-                evse_id = charge_point["evse_id"]
-                grid = dict(await self.client.get_grid_status(evse_id))
-                grid["evse_id"] = evse_id  # the grid status names its own connection, not the charge point
-                self.grid[evse_id] = grid
-                await self.publish(self.settings.grid_topic(evse_id), grid)
-        except MqttError:
-            raise  # the broker, not the backend: let the connection be rebuilt
+            grid = dict(await self.client.get_grid_status(evse_id))
         except Exception as error:
-            logger.error("Could not read the grid status: %r", error)
+            logger.error("Could not read the grid status of %s: %r", evse_id, error)
+            return
+        grid["evse_id"] = evse_id  # the grid status names its own connection, not the charge point
+        self.grid[evse_id] = grid
+        await self.publish(self.settings.grid_topic(evse_id), grid)
 
     async def _sync_transactions(self) -> None:
         """Publish transactions that were not published before: on start, after every change, and on
         the settings interval — which retries a failed sync, and catches a session the backend lists
         only some time after it ended."""
+        await self.charge_points_known.wait()
         while True:
             self.sync_transactions.clear()  # before reading, so a change during the read is not lost
             try:
-                for charge_point in await self.client.get_charge_points():
-                    await self._sync_charge_point(charge_point["evse_id"])
-            except MqttError:
-                raise  # the broker, not the backend
-            except Exception as error:
-                logger.error("Could not read the charge points: %r", error)
+                for evse_id in self.evse_ids:
+                    await self._sync_charge_point(evse_id)  # reports a backend failure itself
             finally:
                 self.store.save()  # also when stopped halfway, or a restart publishes those again
             await _wait_for(self.sync_transactions, self.settings.settings_interval)

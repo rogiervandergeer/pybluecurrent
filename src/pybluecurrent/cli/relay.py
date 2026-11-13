@@ -22,8 +22,13 @@ def relay(
     topic_prefix: Annotated[str, Option(envvar="MQTT_TOPIC_PREFIX", help="Root of every topic.")] = "bluecurrent",
     poll_interval: Annotated[float, Option(envvar="POLL_INTERVAL", min=1, help="Seconds between status polls.")] = 30.0,
     settings_interval: Annotated[
-        float, Option(envvar="SETTINGS_INTERVAL", min=1, help="Seconds between settings and transaction polls.")
-    ] = 300.0,
+        float,
+        Option(
+            envvar="SETTINGS_INTERVAL",
+            min=1,
+            help="Seconds between settings and transaction polls; both also run after a change and a command.",
+        ),
+    ] = 3600.0,
     sync_transactions: Annotated[
         bool, Option(envvar="SYNC_TRANSACTIONS", help="Also publish charging transactions.")
     ] = False,

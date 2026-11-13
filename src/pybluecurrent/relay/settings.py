@@ -19,7 +19,7 @@ class Settings:
     mqtt_qos: int = 1
     topic_prefix: str = "bluecurrent"
     poll_interval: float = 30.0
-    settings_interval: float = 300.0
+    settings_interval: float = 3600.0
     sync_transactions: bool = False
     transaction_lookback_days: int = 28
     transaction_rescan_days: int = 2
