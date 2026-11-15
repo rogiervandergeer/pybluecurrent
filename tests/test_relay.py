@@ -3,6 +3,7 @@
 from asyncio import CancelledError, Event, Task, create_task, get_running_loop, sleep, wait_for
 from contextlib import suppress
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from json import dumps, loads
 from logging import INFO
@@ -368,6 +369,10 @@ def _card_requests(fake_socket: FakeSocket) -> list[dict]:
 
 
 class TestCommands:
+    @fixture(autouse=True)
+    def available(self, fake_rest: FakeRest) -> None:
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_status"))
+
     async def test_sets_the_card(self, offline_client: BlueCurrentClient, fake_socket: FakeSocket):
         fake_socket.on("SET_PLUG_AND_CHARGE_CHARGE_CARD", {"object": SET_CARD_REPLY, "success": True})
         request = {"command": "set_card", "evse_id": EVSE_ID, "uid": "04D4", "id": "a1"}
@@ -385,6 +390,35 @@ class TestCommands:
         fake_socket.on("SET_PLUG_AND_CHARGE_CHARGE_CARD", {"object": SET_CARD_REPLY, "success": False})
         answer = await run_command(offline_client, dumps({"command": "set_card", "evse_id": EVSE_ID, "uid": "X"}))
         assert answer["status"] == "error" and answer["error"]
+
+    async def test_refused_while_a_socket_is_busy(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_rest: FakeRest
+    ):
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))  # socket 2 is charging
+        answer = await run_command(offline_client, dumps({"command": "set_card", "evse_id": EVSE_ID, "uid": "X"}))
+        assert answer["status"] == "error" and answer["error"] == f"{EVSE_ID} socket 2 is charging"
+        assert not _card_requests(fake_socket)
+
+    @mark.parametrize(
+        "response, status_code, error",
+        [
+            ({"error": "nope"}, 500, f"Could not read the status of {EVSE_ID}: HTTPStatusError"),
+            ({"items": []}, 200, f"{EVSE_ID} reports no sockets"),
+        ],
+    )
+    async def test_an_unknown_status_does_not_set_the_card(
+        self,
+        offline_client: BlueCurrentClient,
+        fake_socket: FakeSocket,
+        fake_rest: FakeRest,
+        response: dict,
+        status_code: int,
+        error: str,
+    ):
+        fake_rest.on("chargepointstatus", response, status_code)
+        answer = await run_command(offline_client, dumps({"command": "set_card", "evse_id": EVSE_ID, "uid": "X"}))
+        assert answer["status"] == "error" and answer["error"] == error
+        assert not _card_requests(fake_socket)
 
     @mark.parametrize(
         "request_, error",
@@ -424,6 +458,21 @@ class TestCommands:
         assert answers[0].payload["status"] == "ok" and not answers[0].retain
         assert len(_card_requests(fake_socket)) == 1
         assert relay.refresh_settings.is_set()  # so the settings topic shows the new card
+
+    async def test_a_command_wakes_the_status_poll_at_most_once_a_second(
+        self, relay: _Relay, fake_mqtt: FakeMqtt, settings: Settings
+    ):
+        # An unplug is not pushed: without the wake-up, the status topic shows it only a poll later.
+        relay.settings = replace(settings, poll_interval=60)
+        tasks = [create_task(relay._poll_statuses()), create_task(relay._follow_commands())]
+        await _wait_until(lambda: len(fake_mqtt.published(settings.health_topic)) == 1)
+        for _ in range(10):  # an error answer wakes it too, but a flood costs one read a second
+            fake_mqtt.feed(settings.command_topic, {"command": "fly", "evse_id": EVSE_ID})
+        await sleep(0.5)
+        assert len(fake_mqtt.published(settings.health_topic)) == 1
+        await _wait_until(lambda: len(fake_mqtt.published(settings.health_topic)) == 2)
+        for task in tasks:
+            await _stop(task)
 
     async def test_a_refused_subscription_is_logged(self, relay: _Relay, fake_mqtt: FakeMqtt, monkeypatch, caplog):
         async def refuse(topic, qos=0, timeout=None):

@@ -157,6 +157,7 @@ class _Relay:
         self.activity: dict[tuple[str, int], str] = {}
         self.grid: dict[str, dict[str, Any]] = {}
         self.health: dict[str, Any] = {"status": "down", "error": "starting"}
+        self.poll_statuses = Event()
         self.refresh_settings = Event()
         self.sync_transactions = Event()
         self.unknown_messages: set[str] = set()
@@ -191,12 +192,14 @@ class _Relay:
         logger.info("Polling charge point status every %ss", self.settings.poll_interval)
         while True:
             started = monotonic()
+            self.poll_statuses.clear()  # before reading, so a wake-up during the read is not lost
             statuses, failure = await self._read_statuses()
             for evse_id, status in statuses:
                 await self.publish(self.settings.status_topic(evse_id, status["socket_id"]), status)
                 self._note_activity(evse_id, status)
             await self.publish_health("up" if failure is None else "down", error=failure)
-            await sleep(max(1.0, self.settings.poll_interval - (monotonic() - started)))
+            await _wait_for(self.poll_statuses, max(1.0, self.settings.poll_interval - (monotonic() - started)))
+            await sleep(max(0.0, 1.0 - (monotonic() - started)))  # a wake-up too: at most one read a second
 
     async def _read_statuses(self) -> tuple[list[tuple[str, ChargePointStatus]], str | None]:
         """Read every socket of every charge point. Any exception, even an unexpected one such as an
@@ -329,6 +332,7 @@ class _Relay:
             answer = await run_command(self.client, message.payload)
             logger.info("Command %s for %s: %s", answer["command"], answer["evse_id"], answer["status"])
             await self.publish(self.settings.ack_topic, answer, retain=False)
+            self.poll_statuses.set()  # so the status topic catches up now, not a poll later
             if answer["status"] == "ok":
                 self.refresh_settings.set()
 

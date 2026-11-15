@@ -10,11 +10,24 @@ from pybluecurrent.client import BlueCurrentClient
 
 
 async def _set_card(client: BlueCurrentClient, request: dict[str, Any]) -> None:
-    """Set the plug-and-charge card. A missing or null uid means no card."""
-    uid = request.get("uid")
+    """Set the plug-and-charge card, only while every socket is available. A missing or null uid
+    means no card.
+
+    The status is read fresh: the status topic can be a poll behind, and an unplug is not pushed.
+    """
+    evse_id, uid = request["evse_id"], request.get("uid")
     if uid is not None and (not isinstance(uid, str) or not uid):
         raise ValueError("uid must be a card UID, or null for no card.")
-    await client.set_plug_and_charge_charge_card(request["evse_id"], uid)
+    try:
+        statuses = await client.get_charge_point_statuses(evse_id)
+    except Exception as error:  # short, for the answer: the full error names the URL
+        raise ValueError(f"Could not read the status of {evse_id}: {type(error).__name__}") from error
+    if not statuses:
+        raise ValueError(f"{evse_id} reports no sockets")
+    for status in statuses:
+        if status["activity"] != "available":  # the card is for the whole charge point
+            raise ValueError(f"{evse_id} socket {status['socket_id']} is {status['activity']}")
+    await client.set_plug_and_charge_charge_card(evse_id, uid)
 
 
 COMMANDS: dict[str, Callable[[BlueCurrentClient, dict[str, Any]], Awaitable[None]]] = {"set_card": _set_card}
