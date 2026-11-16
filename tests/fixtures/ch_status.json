@@ -1,0 +1,25 @@
+{
+  "data": {
+    "activity": "charging",
+    "actual_kwh": 18.48,
+    "actual_p1": 8.11,
+    "actual_p2": 8.11,
+    "actual_p3": 8.11,
+    "actual_v1": 232.5,
+    "actual_v2": 234.3,
+    "actual_v3": 232.9,
+    "boosting": false,
+    "evse_id": "BCU123456",
+    "max_offline": 6,
+    "max_usage": 20,
+    "offline_since": "",
+    "smartcharging_max_usage": 16,
+    "start_datetime": "",
+    "stop_datetime": "",
+    "total_cost": 0,
+    "vehicle_status": "C"
+  },
+  "evse_id": "BCU123456",
+  "object": "CH_STATUS",
+  "socket_id": 1
+}

@@ -213,9 +213,10 @@ class BlueCurrentClient:
     async def live_updates(self, *objects: str) -> AsyncGenerator[dict[str, Any], None]:
         """Yield messages from the backend as they arrive, for as long as the client lives.
 
-        The backend pushes messages of its own accord — the grid current, and the status of a charge
-        point while it changes. Subscribing survives reconnects: messages sent while the connection
-        was down are lost, but the generator carries on once it is back.
+        The backend pushes messages of its own accord — the grid current, and the status of a socket
+        while it charges. It can stop for hours without an error, so do not rely on them alone.
+        Subscribing survives reconnects: messages sent while the connection was down are lost, but
+        the generator carries on once it is back.
 
         Args:
             objects: The message types to yield, such as "GRID_CURRENT". Every message is yielded

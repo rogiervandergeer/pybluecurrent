@@ -71,7 +71,7 @@ the websocket is up right now; calls made while it is reconnecting wait for the 
 ### Live updates
 
 Besides answering your calls, the backend sends messages of its own accord: the grid current, and the
-status of a charge point while it changes. `live_updates` yields them as they arrive, across reconnects:
+status of a socket while it charges. `live_updates` yields them as they arrive, across reconnects:
 
 ```python
 async with client:
@@ -83,6 +83,14 @@ Name the message types you want, or omit them to receive everything — includin
 calls. Messages sent while the connection is down are lost, as are messages arriving before your first
 read. The loop ends when the client is closed, and raises if the client stops reconnecting:
 `ConnectionLost`, or `AuthenticationFailed` when the credentials are rejected.
+
+| Type | When | Contents |
+|---|---|---|
+| `GRID_CURRENT` | several times an hour, in bursts, around the clock | `evse_id` and the current per phase, `grid_actual_p1` to `grid_actual_p3`, as integers |
+| `CH_STATUS` | only during a charging session: a few at the start, one at each switch between charging and paused, a few at the unplug, and one every two minutes in between | `evse_id` and `socket_id`, and under `data` the fields of [`get_charge_point_status`](#get_charge_point_status), without `smart_current_heartbeat_timeout` and with `start_datetime` and `stop_datetime` always `""` |
+
+The backend can stop sending these for hours, with no error, while your calls still get answers. Don't
+rely on them alone: read the full status now and then too.
 
 ## Command line
 
@@ -126,9 +134,9 @@ It publishes, retained, as JSON with a UTC `timestamp`:
 
 | Topic | Contents |
 |---|---|
-| `bluecurrent/{evse_id}/{socket_id}/status` | the live status of one socket, every `--poll-interval` seconds and right after a command (at most once a second) |
-| `bluecurrent/{evse_id}/settings` | the charge point's settings, including its smart-charging profiles; read again when a socket's activity changes, after every successful command, and every `--settings-interval` seconds (an hour) for changes made in the app |
-| `bluecurrent/{evse_id}/grid` | the grid current, kept up to date from the backend's own messages |
+| `bluecurrent/{evse_id}/{socket_id}/status` | the live status of one socket, every `--poll-interval` seconds (30; at least 15), right after a command (at most once a second), and on each status message the backend pushes |
+| `bluecurrent/{evse_id}/settings` | the charge point's settings, including its smart-charging profiles; read again when a socket's activity changes, after every successful command, and every `--settings-interval` seconds (an hour; at least two minutes) for changes made in the app |
+| `bluecurrent/{evse_id}/grid` | the grid current, kept up to date from the backend's own messages, and read in full with the settings |
 | `bluecurrent/{evse_id}/transactions` | one message per finished charging session (not retained), with `--sync-transactions` |
 | `bluecurrent/backend_health` | `up`, or `down` with the error; repeated every minute so its `timestamp` shows the relay is alive |
 

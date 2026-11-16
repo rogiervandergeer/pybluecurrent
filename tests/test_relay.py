@@ -225,6 +225,34 @@ class TestSettings:
         await _stop(task)
 
 
+class TestStatusPush:
+    async def test_updates_the_polled_status(
+        self, relay: _Relay, fake_socket: FakeSocket, fake_rest: FakeRest, fake_mqtt: FakeMqtt, settings: Settings
+    ):
+        fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
+        poll = create_task(relay._poll_statuses())
+        await _wait_until(lambda: len(fake_mqtt.published(settings.health_topic)) > 0)
+        await _stop(poll)
+        polled = fake_mqtt.last(settings.status_topic(EVSE_ID, 1)).payload
+
+        task = create_task(relay._follow_updates())
+        await sleep(0)  # let it subscribe
+        push = load_fixture("ch_status")  # as the backend sends it: the socket only at the top
+        push["data"]["unheard_of"] = 1
+        fake_socket.feed(push)
+        await _wait_until(lambda: fake_mqtt.last(settings.status_topic(EVSE_ID, 1)).payload["activity"] == "charging")
+        await _stop(task)
+
+        pushed = fake_mqtt.last(settings.status_topic(EVSE_ID, 1)).payload
+        assert pushed["actual_kwh"] == 18.48 and pushed["vehicle_status"] == "C"
+        assert pushed["max_offline"] == 6
+        for kept in ("smart_current_heartbeat_timeout", "start_datetime"):  # not in the push, or ""
+            assert pushed[kept] == polled[kept]
+        assert "unheard_of" not in pushed  # the topic keeps the shape of the poll
+        assert relay.refresh_settings.is_set() and relay.sync_transactions.is_set()  # an activity change
+        assert relay.poll_statuses.is_set()  # for the session's times, which the push leaves out
+
+
 class TestGrid:
     async def test_the_settings_loop_fetches_it_then_the_pushes_update_it(
         self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_mqtt: FakeMqtt, settings: Settings
@@ -232,13 +260,15 @@ class TestGrid:
         relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
         fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
         fake_socket.on("GET_GRID_STATUS", load_fixture("grid_status"))
-        tasks = [create_task(relay._follow_grid()), create_task(relay._poll_settings())]
+        tasks = [create_task(relay._follow_updates()), create_task(relay._poll_settings())]
         await _wait_until(lambda: settings.grid_topic(EVSE_ID) in fake_mqtt.topics())
         fetched = fake_mqtt.last(settings.grid_topic(EVSE_ID)).payload
         assert fetched["evse_id"] == EVSE_ID and "grid_max_install" in fetched
 
         fake_socket.feed({"object": "GRID_CURRENT", "evse_id": EVSE_ID, "grid_actual_p1": 9})
         await _wait_until(lambda: fake_mqtt.last(settings.grid_topic(EVSE_ID)).payload["grid_actual_p1"] == 9)
+        relay.refresh_settings.set()  # every settings read fetches it again, as the pushes can stop
+        await _wait_until(lambda: [m["command"] for m in fake_socket.sent].count("GET_GRID_STATUS") == 2)
         for task in tasks:
             await _stop(task)
 
@@ -249,15 +279,18 @@ class TestGrid:
         self, relay: _Relay, fake_socket: FakeSocket, fake_mqtt: FakeMqtt, settings: Settings, caplog
     ):
         caplog.set_level(INFO, logger="pybluecurrent.relay.relay")
-        task = create_task(relay._follow_grid())
+        task = create_task(relay._follow_updates())
         await sleep(0)  # let it subscribe
         fake_socket.feed({"object": "GRID_CURRENT", "evse_id": EVSE_ID, "grid_actual_p1": 7})
+        push = {"object": "CH_STATUS", "evse_id": EVSE_ID, "socket_id": 1, "data": {"activity": "charging"}}
+        fake_socket.feed(push)
         fake_socket.feed({"object": "SOMETHING_NEW"})
         fake_socket.feed({"object": "SOMETHING_NEW"})
         fake_socket.feed({"object": "LAST_ONE"})  # queued behind the others: seeing it means all were handled
         await _wait_until(lambda: "LAST_ONE" in caplog.text)
         await _stop(task)
         assert settings.grid_topic(EVSE_ID) not in fake_mqtt.topics()  # no half grid status
+        assert settings.status_topic(EVSE_ID, 1) not in fake_mqtt.topics()  # nor a half socket status
         assert sum("SOMETHING_NEW" in record.getMessage() for record in caplog.records) == 1
 
     async def test_a_backend_given_up_ends_it_even_before_the_charge_points_are_known(
@@ -271,7 +304,7 @@ class TestGrid:
         monkeypatch.setattr(offline_client, "live_updates", given_up)
         relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
         with raises(ConnectionLost):
-            await wait_for(relay._follow_grid(), 1)
+            await wait_for(relay._follow_updates(), 1)
 
 
 class TestTransactions:
@@ -632,6 +665,16 @@ class TestCli:
         env = {"BLUECURRENT_USERNAME": None, "BLUECURRENT_PASSWORD": None, "BLUECURRENT_API_TOKEN": None}
         result = CliRunner().invoke(app, ["relay"], env=env)
         assert result.exit_code == 2 and "BLUECURRENT_API_TOKEN" in result.output
+
+    @mark.parametrize("option, value", [("--poll-interval", "14"), ("--settings-interval", "119")])
+    def test_refuses_a_short_interval(self, option: str, value: str, monkeypatch):
+        # Each poll is a request: too many, and the backend blocks the account.
+        async def no_relay(settings):  # should the check ever break, nothing goes to the network
+            pass
+
+        monkeypatch.setattr("pybluecurrent.relay.run", no_relay)
+        result = CliRunner().invoke(app, ["relay", option, value], env={"BLUECURRENT_API_TOKEN": "token"})
+        assert result.exit_code == 2 and option in result.output
 
     def test_without_the_extra_it_says_what_to_install(self, monkeypatch):
         for name in [name for name in modules if name.startswith("pybluecurrent.relay")]:

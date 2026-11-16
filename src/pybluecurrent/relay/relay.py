@@ -155,6 +155,7 @@ class _Relay:
         self.evse_ids: list[str] = []
         self.charge_points_known = Event()
         self.activity: dict[tuple[str, int], str] = {}
+        self.statuses: dict[tuple[str, int], dict[str, Any]] = {}  # as last published, for the pushes to update
         self.grid: dict[str, dict[str, Any]] = {}
         self.health: dict[str, Any] = {"status": "down", "error": "starting"}
         self.poll_statuses = Event()
@@ -166,7 +167,7 @@ class _Relay:
         tasks = [
             create_task(self._poll_statuses(), name="status poller"),
             create_task(self._poll_settings(), name="settings poller"),
-            create_task(self._follow_grid(), name="grid feed"),
+            create_task(self._follow_updates(), name="live updates"),
             create_task(self._heartbeat(), name="heartbeat"),
             create_task(self._follow_commands(), name="command listener"),
         ]
@@ -195,6 +196,7 @@ class _Relay:
             self.poll_statuses.clear()  # before reading, so a wake-up during the read is not lost
             statuses, failure = await self._read_statuses()
             for evse_id, status in statuses:
+                self.statuses[(evse_id, status["socket_id"])] = dict(status)  # first, for a push during the publish
                 await self.publish(self.settings.status_topic(evse_id, status["socket_id"]), status)
                 self._note_activity(evse_id, status)
             await self.publish_health("up" if failure is None else "down", error=failure)
@@ -218,7 +220,7 @@ class _Relay:
             return statuses, type(error).__name__
         return statuses, None
 
-    def _note_activity(self, evse_id: str, status: ChargePointStatus) -> None:
+    def _note_activity(self, evse_id: str, status: Mapping[str, Any]) -> None:
         """A socket that changed what it is doing may have finished a session, and its settings may differ."""
         key = (evse_id, status["socket_id"])
         activity = status["activity"]
@@ -243,16 +245,16 @@ class _Relay:
                 for charge_point in charge_points:
                     await self.publish(self.settings.settings_topic(charge_point["evse_id"]), charge_point)
                 for evse_id in self.evse_ids:
-                    if evse_id not in self.grid:  # once per charge point; a failed fetch is tried again
-                        await self._fetch_grid(evse_id)
+                    await self._fetch_grid(evse_id)
             # Until the first read succeeds the other tasks wait for it, so try again soon.
             interval = self.settings.settings_interval
             if not self.charge_points_known.is_set():
                 interval = self.settings.poll_interval
             await _wait_for(self.refresh_settings, interval)
 
-    async def _follow_grid(self) -> None:
-        """Keep the grid status current from the backend's messages, once it was fetched in full.
+    async def _follow_updates(self) -> None:
+        """Keep the grid status and the socket statuses current from the backend's pushes, between
+        the full reads. The pushes can stop for hours without notice, so nothing depends on them.
 
         Reads the messages from the start, without waiting for anything: this is where the client
         giving up on the backend comes out, and that must end the relay.
@@ -265,9 +267,26 @@ class _Relay:
                     if grid is not None:  # before the full fetch, which includes these values, skip it
                         grid.update({key: value for key, value in message.items() if key.startswith("grid_")})
                         await self.publish(self.settings.grid_topic(grid["evse_id"]), grid)
+                elif name == "CH_STATUS":
+                    await self._update_status(message)
                 elif name and name not in _EXPECTED_MESSAGES and name not in self.unknown_messages:
                     self.unknown_messages.add(name)
                     logger.info("Received a message type the relay does not publish: %s", name)
+
+    async def _update_status(self, message: dict[str, Any]) -> None:
+        """Apply a status push to the socket's last polled status. Only the fields the poll knows are
+        taken, so the topic keeps the shape of the poll. An empty field is skipped: the push sends
+        the session's start and stop times as "", even while charging."""
+        data = message.get("data") or {}
+        key = (data.get("evse_id", message.get("evse_id")), data.get("socket_id", message.get("socket_id")))
+        status = self.statuses.get(key)
+        if status is None:
+            return  # before the first poll, which publishes the full status
+        status.update({field: value for field, value in data.items() if field in status and value != ""})
+        if self.activity.get(key) != status["activity"]:
+            self.poll_statuses.set()  # the push lacks the session's times: read them now
+        self._note_activity(key[0], status)  # before the publish, so a poll meanwhile has the last word
+        await self.publish(self.settings.status_topic(*key), status)
 
     async def _fetch_grid(self, evse_id: str) -> None:
         """Fetch the full grid status, of which the messages only update the actual currents."""

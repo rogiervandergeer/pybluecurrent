@@ -20,12 +20,14 @@ def relay(
     ] = "pybluecurrent-relay",
     mqtt_qos: Annotated[int, Option(envvar="MQTT_QOS", min=0, max=2, help="Quality of service to publish with.")] = 1,
     topic_prefix: Annotated[str, Option(envvar="MQTT_TOPIC_PREFIX", help="Root of every topic.")] = "bluecurrent",
-    poll_interval: Annotated[float, Option(envvar="POLL_INTERVAL", min=1, help="Seconds between status polls.")] = 30.0,
+    poll_interval: Annotated[
+        float, Option(envvar="POLL_INTERVAL", min=15, help="Seconds between status polls.")
+    ] = 30.0,
     settings_interval: Annotated[
         float,
         Option(
             envvar="SETTINGS_INTERVAL",
-            min=1,
+            min=120,  # the backend blocks an account that asks too often
             help="Seconds between settings and transaction polls; both also run after a change and a command.",
         ),
     ] = 3600.0,
