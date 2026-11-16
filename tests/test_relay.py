@@ -666,15 +666,20 @@ class TestCli:
         result = CliRunner().invoke(app, ["relay"], env=env)
         assert result.exit_code == 2 and "BLUECURRENT_API_TOKEN" in result.output
 
-    @mark.parametrize("option, value", [("--poll-interval", "14"), ("--settings-interval", "119")])
-    def test_refuses_a_short_interval(self, option: str, value: str, monkeypatch):
-        # Each poll is a request: too many, and the backend blocks the account.
+    @mark.parametrize("option, shortest", [("--poll-interval", 15), ("--settings-interval", 120)])
+    def test_refuses_a_short_interval(self, option: str, shortest: int, monkeypatch):
+        # Each poll is a request: too many, and the backend blocks the account. Exit codes, not the
+        # rendered error: how that looks depends on the terminal it is drawn for.
         async def no_relay(settings):  # should the check ever break, nothing goes to the network
             pass
 
         monkeypatch.setattr("pybluecurrent.relay.run", no_relay)
-        result = CliRunner().invoke(app, ["relay", option, value], env={"BLUECURRENT_API_TOKEN": "token"})
-        assert result.exit_code == 2 and option in result.output
+
+        def exit_code(seconds: int) -> int:
+            arguments = ["relay", option, str(seconds)]
+            return CliRunner().invoke(app, arguments, env={"BLUECURRENT_API_TOKEN": "token"}).exit_code
+
+        assert exit_code(shortest) == 0 and exit_code(shortest - 1) == 2
 
     def test_without_the_extra_it_says_what_to_install(self, monkeypatch):
         for name in [name for name in modules if name.startswith("pybluecurrent.relay")]:
