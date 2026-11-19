@@ -169,12 +169,13 @@ The backend reports times without a timezone; the relay reads them as Dutch time
 and publishes them in UTC, whatever timezone it runs in.
 
 The relay reconnects to the broker by itself, and keeps one backend session across those reconnects.
-It stops on `SIGTERM` after saying it is down, and the broker says so on its behalf if the relay is
-killed instead (that message has no `timestamp`). It does exit when the login fails or the backend
-connection is given up for good, after waiting five minutes — rather than logging in over and over,
-which BlueCurrent would refuse — so give it a restart policy that backs off. A charge point that
-leaves your account keeps its last retained messages, so watch their `timestamp`. The relay runs on
-Linux and macOS, not on Windows.
+On a reconnect it publishes the settings and grid status it already has again, and reads the status;
+it asks the backend for the rest only when those reads are due. It stops on `SIGTERM` after saying
+it is down, and the broker says so on its behalf if the relay is killed instead (that message has no
+`timestamp`). It does exit when the login fails or the backend connection is given up for good,
+after waiting five minutes — rather than logging in over and over, which BlueCurrent would refuse —
+so give it a restart policy that backs off. A charge point that leaves your account keeps its last
+retained messages, so watch their `timestamp`. The relay runs on Linux and macOS, not on Windows.
 
 ## Methods
 

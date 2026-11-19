@@ -1,11 +1,11 @@
 """Turning a response into the JSON the relay publishes."""
 
-from datetime import date, datetime, time, timezone
+from datetime import datetime, timezone
 from json import dumps
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-from pybluecurrent.utilities import format_time
+from pybluecurrent.utilities import to_jsonable
 
 # The backend's datetimes carry no timezone. As far as we know they are always Dutch time.
 BACKEND_TIMEZONE = ZoneInfo("Europe/Amsterdam")
@@ -19,21 +19,10 @@ def to_utc(value: datetime) -> datetime:
 
 
 def encode(payload: Mapping[str, Any]) -> str:
-    """Render a message as JSON, with a "timestamp" of its own added: UTC, ISO 8601, with an offset."""
-    message = {**payload, "timestamp": datetime.now(timezone.utc).isoformat()}
-    return dumps(message, ensure_ascii=False, default=_convert)
-
-
-def _convert(value: Any) -> str:
-    """Render a date, datetime or time, wherever json meets one.
+    """Render a message as JSON, with a "timestamp" of its own added: UTC, ISO 8601, with an offset.
 
     Naive datetimes are read as BACKEND_TIMEZONE and rendered as UTC. Times of day stay "HH:MM", the
     format the setters accept.
     """
-    if isinstance(value, time):
-        return format_time(value)
-    if isinstance(value, datetime):
-        return to_utc(value).isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    raise TypeError(f"Cannot render {type(value).__name__} as JSON.")
+    message = {**payload, "timestamp": datetime.now(timezone.utc).isoformat()}
+    return dumps(to_jsonable(message, render_datetime=lambda value: to_utc(value).isoformat()), ensure_ascii=False)

@@ -5,7 +5,7 @@ from asyncio import TimeoutError as AsyncTimeoutError
 from contextlib import aclosing, suppress
 from json import dumps
 from logging import getLogger
-from signal import SIGINT, SIGTERM
+from signal import SIGINT, SIGTERM, Signals, getsignal, signal
 from time import monotonic
 from typing import Any, Mapping
 
@@ -14,7 +14,7 @@ from aiomqtt import MqttError, Will
 
 from pybluecurrent.client import BlueCurrentClient
 from pybluecurrent.exceptions import BlueCurrentException
-from pybluecurrent.models import ChargePointStatus
+from pybluecurrent.models import ChargePoint, ChargePointStatus
 from pybluecurrent.relay.commands import run_command
 from pybluecurrent.relay.serialize import encode, to_utc
 from pybluecurrent.relay.settings import Settings
@@ -45,19 +45,22 @@ async def run(settings: Settings) -> None:
     store = TransactionStore(
         settings.transaction_state_file, settings.transaction_lookback_days, settings.transaction_rescan_days
     )
-    _stop_on_signals(stopping)
+    relay = _Relay(client, settings, store)  # one for every connection: a reconnect asks the backend nothing new
+    previous_handlers = _stop_on_signals(stopping)
     try:
         async with client:
             while not stopping.is_set():
                 try:
-                    await _serve(client, settings, store, stopping)
+                    await _serve(relay, stopping)
                 except MqttError as error:
                     logger.error("MQTT error: %s", error)
                 except BlueCurrentException:
                     raise  # the client gave up on the backend
                 except Exception:
-                    # Unexpected, e.g. a missing field. Start over: exiting would cost a login.
+                    # Unexpected, e.g. a missing field. Start over: exiting would cost a login. Its
+                    # state goes too, in case that is what failed.
                     logger.exception("The relay failed; starting over")
+                    relay = _Relay(client, settings, store)
                 await _wait_for(stopping, settings.mqtt_reconnect_interval)
     except Exception as error:
         # Login failed or the client gave up. Wait out the relogin window first, so a restart does
@@ -68,13 +71,16 @@ async def run(settings: Settings) -> None:
             raise
     finally:
         store.save()
-        for number in (SIGINT, SIGTERM):  # give them back, for a program that runs the relay itself
-            get_running_loop().remove_signal_handler(number)
+        for number, handler in previous_handlers.items():  # give them back, for a program that runs the relay itself
+            get_running_loop().remove_signal_handler(number)  # this alone sets the default
+            if handler is not None:  # None: not set from Python, so it cannot be set back
+                signal(number, handler)
     logger.info("Stopped")
 
 
-async def _serve(client: BlueCurrentClient, settings: Settings, store: TransactionStore, stopping: Event) -> None:
+async def _serve(relay: "_Relay", stopping: Event) -> None:
     """Hold one MQTT connection and publish on it until the relay stops or the connection fails."""
+    settings = relay.settings
     async with MqttClient(
         hostname=settings.mqtt_host,
         port=settings.mqtt_port,
@@ -91,7 +97,7 @@ async def _serve(client: BlueCurrentClient, settings: Settings, store: Transacti
         ),
     ) as mqtt:
         logger.info("Connected to the broker at %s:%s", settings.mqtt_host, settings.mqtt_port)
-        relay = _Relay(client, mqtt, settings, store)
+        relay.mqtt = mqtt
         tasks = relay.start()
         last_word = "shutdown"
         try:
@@ -141,18 +147,19 @@ async def _until_stopped(tasks: list[Task], stopping: Event) -> None:
 
 
 class _Relay:
-    """The publishing tasks, and the state they share."""
+    """The publishing tasks, and the state they share. It outlives a broker connection, so a
+    reconnect republishes what it knows instead of asking the backend again."""
 
-    def __init__(
-        self, client: BlueCurrentClient, mqtt: MqttClient, settings: Settings, store: TransactionStore
-    ) -> None:
+    def __init__(self, client: BlueCurrentClient, settings: Settings, store: TransactionStore) -> None:
         self.client = client
-        self.mqtt = mqtt
+        self.mqtt: MqttClient  # the connection of the moment, set by _serve
         self.settings = settings
         self.store = store
         # The charge points, as the settings loop last read them. The other tasks use these ids
         # rather than asking the backend again: every ask is a websocket request.
+        self.charge_points: list[ChargePoint] = []
         self.evse_ids: list[str] = []
+        self.settings_due = self.transactions_due = 0.0  # monotonic times of the next reads
         self.charge_points_known = Event()
         self.activity: dict[tuple[str, int], str] = {}
         self.statuses: dict[tuple[str, int], dict[str, Any]] = {}  # as last published, for the pushes to update
@@ -196,9 +203,10 @@ class _Relay:
             self.poll_statuses.clear()  # before reading, so a wake-up during the read is not lost
             statuses, failure = await self._read_statuses()
             for evse_id, status in statuses:
-                self.statuses[(evse_id, status["socket_id"])] = dict(status)  # first, for a push during the publish
-                await self.publish(self.settings.status_topic(evse_id, status["socket_id"]), status)
+                # Both before the publish, so a push during it has the last word.
+                self.statuses[(evse_id, status["socket_id"])] = dict(status)
                 self._note_activity(evse_id, status)
+                await self.publish(self.settings.status_topic(evse_id, status["socket_id"]), status)
             await self.publish_health("up" if failure is None else "down", error=failure)
             await _wait_for(self.poll_statuses, max(1.0, self.settings.poll_interval - (monotonic() - started)))
             await sleep(max(0.0, 1.0 - (monotonic() - started)))  # a wake-up too: at most one read a second
@@ -233,24 +241,41 @@ class _Relay:
     async def _poll_settings(self) -> None:
         """Publish each charge point's settings, refreshed on a change and on a slow interval, and
         keep the charge point ids the other tasks use."""
+        # After a reconnect: the broker may have lost the retained messages, as a restart without
+        # persistence does. The backend is asked again only when a read is due.
+        await self._publish_settings()
+        for evse_id in self.evse_ids:
+            if evse_id in self.grid:
+                await self.publish(self.settings.grid_topic(evse_id), self.grid[evse_id])
         while True:
+            await _wait_for(self.refresh_settings, self.settings_due - monotonic())
             self.refresh_settings.clear()  # before reading, so a change during the read is not lost
             try:
-                charge_points = await self.client.get_charge_points()
-            except Exception as error:
-                logger.error("Could not read the charge point settings: %r", error)
-            else:
-                self.evse_ids = [charge_point["evse_id"] for charge_point in charge_points]
-                self.charge_points_known.set()
-                for charge_point in charge_points:
-                    await self.publish(self.settings.settings_topic(charge_point["evse_id"]), charge_point)
-                for evse_id in self.evse_ids:
-                    await self._fetch_grid(evse_id)
+                await self._read_settings()
+            except BaseException:
+                self.refresh_settings.set()  # cut short by the broker: finish on the next connection
+                raise
             # Until the first read succeeds the other tasks wait for it, so try again soon.
             interval = self.settings.settings_interval
             if not self.charge_points_known.is_set():
                 interval = self.settings.poll_interval
-            await _wait_for(self.refresh_settings, interval)
+            self.settings_due = monotonic() + interval
+
+    async def _read_settings(self) -> None:
+        try:
+            self.charge_points = await self.client.get_charge_points()
+        except Exception as error:
+            logger.error("Could not read the charge point settings: %r", error)
+            return
+        self.evse_ids = [charge_point["evse_id"] for charge_point in self.charge_points]
+        self.charge_points_known.set()
+        await self._publish_settings()
+        for evse_id in self.evse_ids:
+            await self._fetch_grid(evse_id)
+
+    async def _publish_settings(self) -> None:
+        for charge_point in self.charge_points:
+            await self.publish(self.settings.settings_topic(charge_point["evse_id"]), charge_point)
 
     async def _follow_updates(self) -> None:
         """Keep the grid status and the socket statuses current from the backend's pushes, between
@@ -305,13 +330,17 @@ class _Relay:
         only some time after it ended."""
         await self.charge_points_known.wait()
         while True:
+            await _wait_for(self.sync_transactions, self.transactions_due - monotonic())
             self.sync_transactions.clear()  # before reading, so a change during the read is not lost
             try:
                 for evse_id in self.evse_ids:
                     await self._sync_charge_point(evse_id)  # reports a backend failure itself
+            except BaseException:
+                self.sync_transactions.set()  # cut short by the broker: finish on the next connection
+                raise
             finally:
                 self.store.save()  # also when stopped halfway, or a restart publishes those again
-            await _wait_for(self.sync_transactions, self.settings.settings_interval)
+            self.transactions_due = monotonic() + self.settings.settings_interval
 
     async def _sync_charge_point(self, evse_id: str) -> None:
         published = 0
@@ -371,17 +400,22 @@ def _with_duration(transaction: Mapping[str, Any]) -> dict[str, Any]:
     return {**transaction, "duration": (to_utc(transaction["end_time"]) - to_utc(started_at)).total_seconds()}
 
 
-def _stop_on_signals(stopping: Event) -> None:
-    """Stop on SIGTERM and SIGINT. SIGTERM needs a handler: as PID 1 in a container, the kernel drops
-    a signal without one, and the relay is killed with a stale "up" retained."""
+def _stop_on_signals(stopping: Event) -> dict[Signals, Any]:
+    """Stop on SIGTERM and SIGINT, and return the handlers they had. SIGTERM needs a handler: as PID 1
+    in a container, the kernel drops a signal without one, and the relay is killed with a stale "up"
+    retained."""
 
     def stop() -> None:
         logger.info("Stopping")
         stopping.set()
 
+    previous = {number: getsignal(number) for number in (SIGINT, SIGTERM)}
     loop = get_running_loop()
-    for number in (SIGINT, SIGTERM):
+    for number in previous:
         loop.add_signal_handler(number, stop)
+        if getsignal(number) is previous[number]:  # the loop's own: another loop handler, not ours to give back
+            previous[number] = None
+    return previous
 
 
 async def _wait_for(event: Event, seconds: float) -> None:

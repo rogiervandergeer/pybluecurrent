@@ -3,12 +3,13 @@
 from asyncio import CancelledError, Event, Task, create_task, get_running_loop, sleep, wait_for
 from contextlib import suppress
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import date, datetime, time, timedelta
+from inspect import signature
 from json import dumps, loads
 from logging import INFO
 from pathlib import Path
-from signal import SIGTERM, raise_signal
+from signal import SIG_DFL, SIGTERM, getsignal, raise_signal, signal
 from sys import modules
 from time import monotonic
 
@@ -21,6 +22,7 @@ from typer.testing import CliRunner
 
 from pybluecurrent import BlueCurrentClient
 from pybluecurrent.cli import app
+from pybluecurrent.cli.relay import relay as relay_command
 from pybluecurrent.exceptions import ConnectionLost
 from pybluecurrent.relay.commands import run_command
 from pybluecurrent.relay.relay import _Relay, _serve, _with_duration, run
@@ -57,10 +59,17 @@ def fake_mqtt() -> FakeMqtt:
     return FakeMqtt()
 
 
+def _relay(client: BlueCurrentClient, mqtt: FakeMqtt, settings: Settings, store: TransactionStore) -> _Relay:
+    """A relay on a connection, as _serve gives it one."""
+    relay = _Relay(client, settings, store)
+    relay.mqtt = mqtt
+    return relay
+
+
 @fixture
 def relay(offline_client: BlueCurrentClient, fake_mqtt: FakeMqtt, settings: Settings) -> _Relay:
     """A relay that knows its charge point, as if the settings loop had read it already."""
-    relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
+    relay = _relay(offline_client, fake_mqtt, settings, TransactionStore())
     relay.evse_ids = [EVSE_ID]
     relay.charge_points_known.set()
     return relay
@@ -170,7 +179,7 @@ class TestStatus:
     ):
         # The first poll comes before the settings loop has read the charge points: it waits for them.
         fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
-        relay = _Relay(offline_client, fake_mqtt, Settings(poll_interval=2), TransactionStore())
+        relay = _relay(offline_client, fake_mqtt, Settings(poll_interval=2), TransactionStore())
         read = create_task(relay._read_statuses())
         await sleep(0)
         relay.evse_ids = [EVSE_ID]
@@ -179,7 +188,7 @@ class TestStatus:
         assert failure is None and len(statuses) == 2
 
     async def test_gives_up_waiting_after_one_poll(self, offline_client: BlueCurrentClient, fake_mqtt: FakeMqtt):
-        relay = _Relay(offline_client, fake_mqtt, Settings(poll_interval=0.01), TransactionStore())
+        relay = _relay(offline_client, fake_mqtt, Settings(poll_interval=0.01), TransactionStore())
         assert await relay._read_statuses() == ([], "no charge points yet")
 
     async def test_a_changed_activity_triggers_a_refresh(self, relay: _Relay):
@@ -193,7 +202,7 @@ class TestSettings:
     async def test_publishes_the_settings_of_every_charge_point(
         self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_mqtt: FakeMqtt, settings: Settings
     ):
-        relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
+        relay = _relay(offline_client, fake_mqtt, settings, TransactionStore())
         fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
         task = create_task(relay._poll_settings())
         await _wait_until(lambda: settings.settings_topic(EVSE_ID) in fake_mqtt.topics())
@@ -209,8 +218,9 @@ class TestSettings:
     ):
         # The other tasks wait for the charge points, so a failed first read must not wait an hour.
         settings = Settings(poll_interval=0.01, settings_interval=60)
-        relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
+        relay = _relay(offline_client, fake_mqtt, settings, TransactionStore())
         fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
+        fake_socket.on("GET_GRID_STATUS", load_fixture("grid_status"))
         read = offline_client.get_charge_points
         failures = [OSError("network")]
 
@@ -221,8 +231,21 @@ class TestSettings:
 
         monkeypatch.setattr(offline_client, "get_charge_points", fails_once)
         task = create_task(relay._poll_settings())
-        await _wait_until(relay.charge_points_known.is_set)
+        await _wait_until(lambda: settings.grid_topic(EVSE_ID) in fake_mqtt.topics())  # the read is done
+        await sleep(0.1)  # ten poll intervals
         await _stop(task)
+        # Then the settings interval: one read, not a second one a poll interval later.
+        assert [message["command"] for message in fake_socket.sent].count("GET_CHARGE_POINTS") == 1
+
+    async def test_a_read_cut_short_is_finished_on_the_next_connection(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_mqtt: FakeMqtt, settings: Settings
+    ):
+        # GET_CHARGE_POINTS gets no answer: the read is still waiting when the connection ends.
+        relay = _relay(offline_client, fake_mqtt, settings, TransactionStore())
+        task = create_task(relay._poll_settings())
+        await _wait_until(lambda: any(message.get("command") == "GET_CHARGE_POINTS" for message in fake_socket.sent))
+        await _stop(task)
+        assert relay.refresh_settings.is_set()  # or the next read waits for the settings interval
 
 
 class TestStatusPush:
@@ -257,7 +280,7 @@ class TestGrid:
     async def test_the_settings_loop_fetches_it_then_the_pushes_update_it(
         self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_mqtt: FakeMqtt, settings: Settings
     ):
-        relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
+        relay = _relay(offline_client, fake_mqtt, settings, TransactionStore())
         fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
         fake_socket.on("GET_GRID_STATUS", load_fixture("grid_status"))
         tasks = [create_task(relay._follow_updates()), create_task(relay._poll_settings())]
@@ -302,7 +325,7 @@ class TestGrid:
             yield
 
         monkeypatch.setattr(offline_client, "live_updates", given_up)
-        relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
+        relay = _relay(offline_client, fake_mqtt, settings, TransactionStore())
         with raises(ConnectionLost):
             await wait_for(relay._follow_updates(), 1)
 
@@ -338,7 +361,7 @@ class TestTransactions:
         overnight.update(started_at="01-07-2026 22:00:00", end_time="02-07-2026 07:00:00")
         response["data"]["transactions"] = [overnight]
         fake_rest.on("gettransactions", response)
-        relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore(lookback_days=0, rescan_days=0))
+        relay = _relay(offline_client, fake_mqtt, settings, TransactionStore(lookback_days=0, rescan_days=0))
         await relay._sync_charge_point(EVSE_ID)
         assert relay.store.start_date(EVSE_ID) == date(2026, 7, 2)
 
@@ -362,7 +385,7 @@ class TestTransactions:
         self, offline_client: BlueCurrentClient, fake_rest: FakeRest, fake_mqtt: FakeMqtt
     ):
         fake_rest.on("gettransactions", load_fixture("transactions"))
-        relay = _Relay(offline_client, fake_mqtt, Settings(), TransactionStore())
+        relay = _relay(offline_client, fake_mqtt, Settings(), TransactionStore())
         task = create_task(relay._sync_transactions())
         await sleep(0.05)
         assert not fake_rest.requests  # nothing to ask for before the ids are known
@@ -375,7 +398,7 @@ class TestTransactions:
         self, offline_client: BlueCurrentClient, fake_rest: FakeRest, fake_mqtt: FakeMqtt
     ):
         settings = Settings(settings_interval=0.01)
-        relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
+        relay = _relay(offline_client, fake_mqtt, settings, TransactionStore())
         relay.evse_ids = [EVSE_ID]
         relay.charge_points_known.set()
         fake_rest.on("gettransactions", {"error": "nope"}, 500)
@@ -384,6 +407,19 @@ class TestTransactions:
         fake_rest.on("gettransactions", load_fixture("transactions"))  # without a new activity change
         await _wait_until(lambda: settings.transactions_topic(EVSE_ID) in fake_mqtt.topics())
         await _stop(task)
+
+    async def test_a_sync_cut_short_is_finished_on_the_next_connection(self, relay: _Relay, monkeypatch):
+        started = Event()
+
+        async def hangs(self, evse_id):
+            started.set()
+            await Event().wait()
+
+        monkeypatch.setattr(_Relay, "_sync_charge_point", hangs)
+        task = create_task(relay._sync_transactions())
+        await wait_for(started.wait(), 1)
+        await _stop(task)
+        assert relay.sync_transactions.is_set()  # or the next sync waits for the settings interval
 
     def test_duration_needs_the_start(self):
         assert "duration" not in _with_duration({"started_at": None, "end_time": datetime(2026, 9, 1)})
@@ -524,7 +560,7 @@ class TestHeartbeat:
         self, offline_client: BlueCurrentClient, fake_mqtt: FakeMqtt, status: str, error: str | None
     ):
         settings = Settings(heartbeat_interval=0.01)
-        relay = _Relay(offline_client, fake_mqtt, settings, TransactionStore())
+        relay = _relay(offline_client, fake_mqtt, settings, TransactionStore())
         await relay.publish_health(status, error=error)
         task = create_task(relay._heartbeat())
         await _wait_until(lambda: len(fake_mqtt.published(settings.health_topic)) > 1)
@@ -542,7 +578,7 @@ class TestServe:
         monkeypatch.setattr("pybluecurrent.relay.relay.MqttClient", make_fake_mqtt(fake_mqtt))
         stopping = Event()
         stopping.set()
-        await wait_for(_serve(offline_client, settings, TransactionStore(), stopping), 2)
+        await wait_for(_serve(_Relay(offline_client, settings, TransactionStore()), stopping), 2)
         health = fake_mqtt.last(settings.health_topic)
         assert health.payload["status"] == "down" and health.payload["error"] == "shutdown" and health.retain
         # The broker's word for a relay that was killed: retained, and without the time it connected.
@@ -561,7 +597,7 @@ class TestServe:
         monkeypatch.setattr(mqtt, "publish", failing_publish)
         monkeypatch.setattr("pybluecurrent.relay.relay.MqttClient", make_fake_mqtt(mqtt))
         with raises(MqttError):
-            await wait_for(_serve(offline_client, settings, TransactionStore(), Event()), 2)
+            await wait_for(_serve(_Relay(offline_client, settings, TransactionStore()), Event()), 2)
 
     async def test_a_broker_error_on_a_live_connection_still_says_down(
         self, offline_client: BlueCurrentClient, fake_mqtt: FakeMqtt, monkeypatch, settings: Settings
@@ -579,7 +615,7 @@ class TestServe:
         monkeypatch.setattr(fake_mqtt, "publish", fails_once)
         monkeypatch.setattr("pybluecurrent.relay.relay.MqttClient", make_fake_mqtt(fake_mqtt))
         with raises(MqttError):
-            await wait_for(_serve(offline_client, settings, TransactionStore(), Event()), 2)
+            await wait_for(_serve(_Relay(offline_client, settings, TransactionStore()), Event()), 2)
         health = fake_mqtt.last(settings.health_topic)
         assert health.payload["status"] == "down" and health.payload["error"] == "MqttError" and health.retain
 
@@ -637,6 +673,31 @@ class TestRun:
         logins = [message for message in backend.sent if message.get("command") == "VALIDATE_PASSWORD"]
         assert len(logins) == 1
 
+    async def test_a_broker_drop_republishes_without_asking_the_backend(self, monkeypatch, backend: FakeSocket):
+        settings = Settings(
+            username="username", password="password", mqtt_reconnect_interval=0.01, heartbeat_interval=0.2
+        )
+        mqtt = FakeMqtt()
+        publish = mqtt.publish
+        failures = [MqttError("broker gone")]
+
+        async def fails_on_the_first_heartbeat(topic, payload, qos=0, retain=False, timeout=None):
+            if topic == settings.health_topic and not retain and failures:
+                raise failures.pop()
+            await publish(topic, payload, qos, retain, timeout)
+
+        monkeypatch.setattr(mqtt, "publish", fails_on_the_first_heartbeat)
+        monkeypatch.setattr("pybluecurrent.relay.relay.MqttClient", make_fake_mqtt(mqtt))
+        task = create_task(run(settings))
+        await _wait_until(lambda: len(mqtt.subscriptions) == 2, 5)  # the second connection is up
+        raise_signal(SIGTERM)
+        await wait_for(task, 5)
+
+        commands = [message.get("command") for message in backend.sent]
+        assert commands.count("GET_CHARGE_POINTS") == 1 and commands.count("GET_GRID_STATUS") == 1
+        assert len(mqtt.published(settings.settings_topic(EVSE_ID))) == 2  # the broker may have lost them
+        assert len(mqtt.published(settings.grid_topic(EVSE_ID))) == 2
+
     async def test_a_failed_login_waits_before_it_gives_up(self, monkeypatch):
         # Or a restart policy would log in again at once, and a burst of logins locks the account.
         monkeypatch.setattr("pybluecurrent.client.connect", lambda *args, **kwargs: _Refused())
@@ -647,12 +708,30 @@ class TestRun:
         assert monotonic() - started >= 0.2
 
     async def test_stopping_while_it_waits_is_a_clean_exit(self, monkeypatch, caplog):
+        def own_handler(number, frame):  # a program that runs the relay itself, with a handler of its own
+            pass
+
         monkeypatch.setattr("pybluecurrent.client.connect", lambda *args, **kwargs: _Refused())
+        before = signal(SIGTERM, own_handler)
+        try:
+            task = create_task(run(Settings(username="username", password="password")))
+            await _wait_until(lambda: "Giving up" in caplog.text)
+            raise_signal(SIGTERM)
+            assert await wait_for(task, 2) is None  # not the login error: it was asked to stop
+            assert not get_running_loop().remove_signal_handler(SIGTERM)  # the relay gave it back
+            assert getsignal(SIGTERM) is own_handler  # as it was, not the default
+        finally:
+            signal(SIGTERM, before)
+
+    async def test_a_handler_the_loop_set_is_not_given_back(self, monkeypatch, caplog):
+        # getsignal shows only the loop's own no-op: putting that back would make SIGTERM do nothing.
+        monkeypatch.setattr("pybluecurrent.client.connect", lambda *args, **kwargs: _Refused())
+        get_running_loop().add_signal_handler(SIGTERM, lambda: None)
         task = create_task(run(Settings(username="username", password="password")))
         await _wait_until(lambda: "Giving up" in caplog.text)
         raise_signal(SIGTERM)
-        assert await wait_for(task, 2) is None  # not the login error: it was asked to stop
-        assert not get_running_loop().remove_signal_handler(SIGTERM)  # the relay gave it back
+        await wait_for(task, 2)
+        assert getsignal(SIGTERM) is SIG_DFL
 
 
 class TestCli:
@@ -681,6 +760,13 @@ class TestCli:
 
         assert exit_code(shortest) == 0 and exit_code(shortest - 1) == 2
 
+    def test_has_the_defaults_of_the_settings(self):
+        # Both define them: the command line cannot import Settings before it knows the extra is there.
+        options = signature(relay_command).parameters
+        defaults = {field.name: field.default for field in fields(Settings) if field.name in options}
+        assert set(defaults) | {"heartbeat_interval", "mqtt_reconnect_interval"} == {f.name for f in fields(Settings)}
+        assert defaults == {name: options[name].default for name in defaults}
+
     def test_without_the_extra_it_says_what_to_install(self, monkeypatch):
         for name in [name for name in modules if name.startswith("pybluecurrent.relay")]:
             monkeypatch.delitem(modules, name)
@@ -708,3 +794,8 @@ def test_topics():
     assert settings.health_topic == "p/backend_health"
     assert settings.command_topic == "p/command"
     assert settings.ack_topic == "p/command/ack"
+
+
+def test_settings_keep_the_secrets_out_of_their_repr():
+    settings = Settings(password="hunter2", api_token="token-123", mqtt_password="broker-secret")
+    assert not [secret for secret in ("hunter2", "token-123", "broker-secret") if secret in repr(settings)]

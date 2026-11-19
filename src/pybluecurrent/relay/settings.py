@@ -1,6 +1,6 @@
 """Everything the relay is configured with, in one place."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -9,12 +9,12 @@ class Settings:
     """The relay's configuration, as the command line and the environment supply it."""
 
     username: str | None = None
-    password: str | None = None
-    api_token: str | None = None
+    password: str | None = field(default=None, repr=False)  # the secrets stay out of logs and tracebacks
+    api_token: str | None = field(default=None, repr=False)
     mqtt_host: str = "localhost"
     mqtt_port: int = 1883
     mqtt_username: str | None = None
-    mqtt_password: str | None = None
+    mqtt_password: str | None = field(default=None, repr=False)
     mqtt_client_id: str = "pybluecurrent-relay"
     mqtt_qos: int = 1
     topic_prefix: str = "bluecurrent"
