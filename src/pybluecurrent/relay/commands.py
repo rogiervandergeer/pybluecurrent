@@ -13,7 +13,7 @@ async def _set_card(client: BlueCurrentClient, request: dict[str, Any]) -> None:
     """Set the plug-and-charge card, only while every socket is available. A missing or null uid
     means no card.
 
-    The status is read fresh: the status topic can be a poll behind, and an unplug is not pushed.
+    The status is read fresh: the status topic can be a poll behind, as the pushes can stop.
     """
     evse_id, uid = request["evse_id"], request.get("uid")
     if uid is not None and (not isinstance(uid, str) or not uid):

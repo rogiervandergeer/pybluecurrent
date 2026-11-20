@@ -247,6 +247,30 @@ class TestSettings:
         await _stop(task)
         assert relay.refresh_settings.is_set()  # or the next read waits for the settings interval
 
+    async def test_reads_at_most_once_a_poll_interval(
+        self, offline_client: BlueCurrentClient, fake_socket: FakeSocket, fake_mqtt: FakeMqtt
+    ):
+        # Commands and changes ask for a read; an automation that answers each publish with a
+        # command asks without end. The asks in between merge into one read.
+        settings = Settings(poll_interval=0.3, settings_interval=60)
+        relay = _relay(offline_client, fake_mqtt, settings, TransactionStore())
+        fake_socket.on("GET_CHARGE_POINTS", load_fixture("charge_points"))
+        fake_socket.on("GET_GRID_STATUS", load_fixture("grid_status"))
+
+        def reads() -> int:
+            return [message["command"] for message in fake_socket.sent].count("GET_CHARGE_POINTS")
+
+        task = create_task(relay._poll_settings())
+        await _wait_until(lambda: settings.grid_topic(EVSE_ID) in fake_mqtt.topics())
+        for _ in range(3):
+            relay.refresh_settings.set()
+            await sleep(0.05)
+        assert reads() == 1
+        await _wait_until(lambda: reads() == 2)
+        await sleep(0.1)
+        await _stop(task)
+        assert reads() == 2
+
 
 class TestStatusPush:
     async def test_updates_the_polled_status(
@@ -397,7 +421,7 @@ class TestTransactions:
     async def test_a_failed_sync_is_retried(
         self, offline_client: BlueCurrentClient, fake_rest: FakeRest, fake_mqtt: FakeMqtt
     ):
-        settings = Settings(settings_interval=0.01)
+        settings = Settings(poll_interval=0.01, settings_interval=0.01)
         relay = _relay(offline_client, fake_mqtt, settings, TransactionStore())
         relay.evse_ids = [EVSE_ID]
         relay.charge_points_known.set()
@@ -420,6 +444,25 @@ class TestTransactions:
         await wait_for(started.wait(), 1)
         await _stop(task)
         assert relay.sync_transactions.is_set()  # or the next sync waits for the settings interval
+
+    async def test_syncs_at_most_once_a_poll_interval(self, relay: _Relay, monkeypatch):
+        syncs = []
+
+        async def sync(self, evse_id):
+            syncs.append(evse_id)
+
+        monkeypatch.setattr(_Relay, "_sync_charge_point", sync)
+        relay.settings = replace(relay.settings, poll_interval=0.3, settings_interval=60)
+        task = create_task(relay._sync_transactions())
+        await _wait_until(lambda: syncs)
+        for _ in range(3):  # a car that keeps switching between charging and paused
+            relay.sync_transactions.set()
+            await sleep(0.05)
+        assert len(syncs) == 1
+        await _wait_until(lambda: len(syncs) == 2)
+        await sleep(0.1)
+        await _stop(task)
+        assert len(syncs) == 2
 
     def test_duration_needs_the_start(self):
         assert "duration" not in _with_duration({"started_at": None, "end_time": datetime(2026, 9, 1)})
@@ -673,6 +716,28 @@ class TestRun:
         logins = [message for message in backend.sent if message.get("command") == "VALIDATE_PASSWORD"]
         assert len(logins) == 1
 
+    async def test_an_error_that_keeps_coming_back_waits_longer_each_time(
+        self, monkeypatch, backend: FakeSocket, caplog
+    ):
+        # Each start reads the backend again, so a bug that fails every time must not do that every 30 s.
+        mqtt = FakeMqtt()
+        monkeypatch.setattr("pybluecurrent.relay.relay.MqttClient", make_fake_mqtt(mqtt))
+
+        def fails(self, evse_id, status):
+            raise KeyError("activity")
+
+        monkeypatch.setattr(_Relay, "_note_activity", fails)
+        settings = Settings(username="username", password="password", mqtt_reconnect_interval=0.01)
+        task = create_task(run(settings))
+
+        def waits() -> list[float]:
+            return [record.args[0] for record in caplog.records if "starting over" in record.msg]
+
+        await _wait_until(lambda: len(waits()) == 4, 5)
+        raise_signal(SIGTERM)
+        await wait_for(task, 5)
+        assert waits()[:4] == [0.01, 0.02, 0.04, 0.08]
+
     async def test_a_broker_drop_republishes_without_asking_the_backend(self, monkeypatch, backend: FakeSocket):
         settings = Settings(
             username="username", password="password", mqtt_reconnect_interval=0.01, heartbeat_interval=0.2
@@ -766,6 +831,20 @@ class TestCli:
         defaults = {field.name: field.default for field in fields(Settings) if field.name in options}
         assert set(defaults) | {"heartbeat_interval", "mqtt_reconnect_interval"} == {f.name for f in fields(Settings)}
         assert defaults == {name: options[name].default for name in defaults}
+
+    def test_each_environment_variable_is_the_option_with_the_prefix(self):
+        options = signature(relay_command).parameters
+        envvars = {name: option.annotation.__metadata__[0].envvar for name, option in options.items()}
+        assert envvars == {name: f"BLUECURRENT_{name.upper()}" for name in envvars}
+
+    def test_a_network_error_is_one_line(self, monkeypatch):
+        async def no_network(settings):
+            raise OSError("Network is unreachable")
+
+        monkeypatch.setattr("pybluecurrent.relay.run", no_network)
+        result = CliRunner().invoke(app, ["relay"], env={"BLUECURRENT_API_TOKEN": "token"})
+        assert result.exit_code == 1 and isinstance(result.exception, SystemExit)  # not the OSError's traceback
+        assert "error: Network is unreachable" in result.output
 
     def test_without_the_extra_it_says_what_to_install(self, monkeypatch):
         for name in [name for name in modules if name.startswith("pybluecurrent.relay")]:

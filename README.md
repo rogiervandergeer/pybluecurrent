@@ -125,7 +125,7 @@ pip install "pybluecurrent[mqtt]"
 
 export BLUECURRENT_USERNAME="your_username"
 export BLUECURRENT_PASSWORD="your_secret_password"
-export MQTT_HOST="broker.example.com"
+export BLUECURRENT_MQTT_HOST="broker.example.com"
 
 pybluecurrent relay
 ```
@@ -135,15 +135,14 @@ It publishes, retained, as JSON with a UTC `timestamp`:
 | Topic | Contents |
 |---|---|
 | `bluecurrent/{evse_id}/{socket_id}/status` | the live status of one socket, every `--poll-interval` seconds (30; at least 15), right after a command (at most once a second), and on each status message the backend pushes |
-| `bluecurrent/{evse_id}/settings` | the charge point's settings, including its smart-charging profiles; read again when a socket's activity changes, after every successful command, and every `--settings-interval` seconds (an hour; at least two minutes) for changes made in the app |
+| `bluecurrent/{evse_id}/settings` | the charge point's settings, including its smart-charging profiles; read again when a socket's activity changes and after every successful command (at most once a poll interval), and every `--settings-interval` seconds (an hour; at least two minutes) for changes made in the app |
 | `bluecurrent/{evse_id}/grid` | the grid current, kept up to date from the backend's own messages, and read in full with the settings |
-| `bluecurrent/{evse_id}/transactions` | one message per finished charging session (not retained), with `--sync-transactions` |
+| `bluecurrent/{evse_id}/transactions` | one message per finished charging session (not retained), with `--sync-transactions`. Without `--transaction-state-file`, a restart publishes the last `--transaction-lookback-days` again, so set one if you add them up |
 | `bluecurrent/backend_health` | `up`, or `down` with the error; repeated every minute so its `timestamp` shows the relay is alive |
 
-Every option can also be set through an environment variable: `MQTT_HOST`, `MQTT_PORT`,
-`MQTT_USERNAME`, `MQTT_PASSWORD`, `MQTT_CLIENT_ID`, `MQTT_QOS`, `MQTT_TOPIC_PREFIX`, `POLL_INTERVAL`,
-`SETTINGS_INTERVAL`, `SYNC_TRANSACTIONS`, `TRANSACTION_LOOKBACK_DAYS`, `TRANSACTION_RESCAN_DAYS`,
-`TRANSACTION_STATE_FILE` and `BLUECURRENT_DEBUG`. Run `pybluecurrent relay --help` for the details.
+Every option can also be set through an environment variable: its name in capitals, after
+`BLUECURRENT_`, such as `BLUECURRENT_MQTT_HOST` for `--mqtt-host`. Run `pybluecurrent relay --help`
+for the details.
 
 To change a setting, publish a JSON command to `bluecurrent/command`. The answer comes on
 `bluecurrent/command/ack` (not retained), with the `id`, `command` and `evse_id` you sent, `status`
@@ -163,7 +162,8 @@ mosquitto_pub -h broker.example.com -t bluecurrent/command \
 ```
 
 Anyone who can publish to `bluecurrent/command` can change your charge point, so limit that with
-your broker's access control.
+your broker's access control. Limit who can read too: the retained settings hold your address and
+your cards.
 
 The backend reports times without a timezone; the relay reads them as Dutch time (Europe/Amsterdam)
 and publishes them in UTC, whatever timezone it runs in.

@@ -46,10 +46,12 @@ async def run(settings: Settings) -> None:
         settings.transaction_state_file, settings.transaction_lookback_days, settings.transaction_rescan_days
     )
     relay = _Relay(client, settings, store)  # one for every connection: a reconnect asks the backend nothing new
+    failures = 0  # unexpected ones in a row
     previous_handlers = _stop_on_signals(stopping)
     try:
         async with client:
             while not stopping.is_set():
+                started, wait = monotonic(), settings.mqtt_reconnect_interval
                 try:
                     await _serve(relay, stopping)
                 except MqttError as error:
@@ -58,10 +60,13 @@ async def run(settings: Settings) -> None:
                     raise  # the client gave up on the backend
                 except Exception:
                     # Unexpected, e.g. a missing field. Start over: exiting would cost a login. Its
-                    # state goes too, in case that is what failed.
-                    logger.exception("The relay failed; starting over")
+                    # state goes too, in case that is what failed. Each start reads the backend, so
+                    # wait longer each time it fails again soon, up to the settings interval.
+                    failures = failures + 1 if monotonic() - started < settings.settings_interval else 1
+                    wait = min(wait * 2 ** (failures - 1), settings.settings_interval)
+                    logger.exception("The relay failed; starting over in %.0f s", wait)
                     relay = _Relay(client, settings, store)
-                await _wait_for(stopping, settings.mqtt_reconnect_interval)
+                await _wait_for(stopping, wait)
     except Exception as error:
         # Login failed or the client gave up. Wait out the relogin window first, so a restart does
         # not log in again at once.
@@ -260,6 +265,7 @@ class _Relay:
             if not self.charge_points_known.is_set():
                 interval = self.settings.poll_interval
             self.settings_due = monotonic() + interval
+            await sleep(self.settings.poll_interval)  # at most one read a poll interval, however often asked
 
     async def _read_settings(self) -> None:
         try:
@@ -341,6 +347,7 @@ class _Relay:
             finally:
                 self.store.save()  # also when stopped halfway, or a restart publishes those again
             self.transactions_due = monotonic() + self.settings.settings_interval
+            await sleep(self.settings.poll_interval)  # at most one sync a poll interval, however often asked
 
     async def _sync_charge_point(self, evse_id: str) -> None:
         published = 0
