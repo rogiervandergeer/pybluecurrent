@@ -2,6 +2,7 @@
 
 from typer import Typer
 
+from pybluecurrent.cli.relay import relay
 from pybluecurrent.cli.transactions import transactions
 
 app = Typer(no_args_is_help=True, add_completion=False, help="Command-line access to your BlueCurrent account.")
@@ -13,6 +14,7 @@ def _root() -> None:
 
 
 app.command()(transactions)
+app.command()(relay)
 
 main = app
 

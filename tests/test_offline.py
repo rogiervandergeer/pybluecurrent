@@ -241,7 +241,7 @@ class TestOfflineChargePointStatus:
 
     async def test_statuses_returns_all_sockets(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
         fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
-        statuses = await offline_client.get_charge_point_statuses("BCU109470")
+        statuses = await offline_client.get_charge_point_statuses("BCU123456")
         assert_model(statuses, list[ChargePointStatus])
         assert [status["socket_id"] for status in statuses] == [1, 2]
         assert statuses[1]["activity"] == "charging"
@@ -251,7 +251,7 @@ class TestOfflineChargePointStatus:
         """There is no sensible default between two sockets, so the caller must name one."""
         fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
         with raises(ValueError, match="sockets \\[1, 2\\]"):
-            await offline_client.get_charge_point_status("BCU109470")
+            await offline_client.get_charge_point_status("BCU123456")
 
     async def test_omitted_socket_id_returns_the_only_socket_whatever_its_number(
         self, offline_client: BlueCurrentClient, fake_rest: FakeRest
@@ -263,7 +263,7 @@ class TestOfflineChargePointStatus:
 
     async def test_selects_requested_socket(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
         fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
-        status = await offline_client.get_charge_point_status("BCU109470", socket_id=2)
+        status = await offline_client.get_charge_point_status("BCU123456", socket_id=2)
         assert status["socket_id"] == 2
         assert status["activity"] == "charging"
 
@@ -422,7 +422,7 @@ class TestOfflineSetStatus:
     async def test_multi_socket_requires_socket_id(self, offline_client: BlueCurrentClient, fake_rest: FakeRest):
         fake_rest.on("chargepointstatus", load_fixture("charge_point_statuses"))
         with raises(ValueError):
-            await offline_client.set_status("BCU109470", enabled=False)
+            await offline_client.set_status("BCU123456", enabled=False)
         # Only the status lookup went out; no action was posted.
         assert fake_rest.last_path == "chargepointstatus"
 

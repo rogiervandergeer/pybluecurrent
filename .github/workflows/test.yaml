@@ -21,11 +21,13 @@ jobs:
           python-version: "3.x"
 
       - name: Install Dependencies
+        # A venv: ty resolves imports from the project's environment, and finds none on a bare interpreter.
         run: |
-          pip3 install -e ".[dev]"
+          python3 -m venv .venv
+          .venv/bin/pip install -e ".[dev,mqtt]"
 
       - name: Run pre-commit
-        run: pre-commit run --all-files
+        run: .venv/bin/pre-commit run --all-files
 
   test:
     runs-on: ubuntu-latest

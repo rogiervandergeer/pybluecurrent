@@ -71,7 +71,7 @@ the websocket is up right now; calls made while it is reconnecting wait for the 
 ### Live updates
 
 Besides answering your calls, the backend sends messages of its own accord: the grid current, and the
-status of a charge point while it changes. `live_updates` yields them as they arrive, across reconnects:
+status of a socket while it charges. `live_updates` yields them as they arrive, across reconnects:
 
 ```python
 async with client:
@@ -83,6 +83,14 @@ Name the message types you want, or omit them to receive everything — includin
 calls. Messages sent while the connection is down are lost, as are messages arriving before your first
 read. The loop ends when the client is closed, and raises if the client stops reconnecting:
 `ConnectionLost`, or `AuthenticationFailed` when the credentials are rejected.
+
+| Type | When | Contents |
+|---|---|---|
+| `GRID_CURRENT` | several times an hour, in bursts, around the clock | `evse_id` and the current per phase, `grid_actual_p1` to `grid_actual_p3`, as integers |
+| `CH_STATUS` | only during a charging session: a few at the start, one at each switch between charging and paused, a few at the unplug, and one every two minutes in between | `evse_id` and `socket_id`, and under `data` the fields of [`get_charge_point_status`](#get_charge_point_status), without `smart_current_heartbeat_timeout` and with `start_datetime` and `stop_datetime` always `""` |
+
+The backend can stop sending these for hours, with no error, while your calls still get answers. Don't
+rely on them alone: read the full status now and then too.
 
 ## Command line
 
@@ -106,6 +114,68 @@ or from the matching `--username` / `--password` / `--api-token` options.
 - `--days`: Only export the last N days. Defaults to your whole history.
 - `-o`, `--output`: Write to a file instead of stdout.
 - `--newest-first` / `--oldest-first`: Output order, newest first by default.
+
+### MQTT relay
+
+`pybluecurrent relay` publishes what your charge points report to an MQTT broker, for a dashboard or
+a home automation system to read, and runs the commands it receives there. It needs the `mqtt` extra:
+
+```shell
+pip install "pybluecurrent[mqtt]"
+
+export BLUECURRENT_USERNAME="your_username"
+export BLUECURRENT_PASSWORD="your_secret_password"
+export BLUECURRENT_MQTT_HOST="broker.example.com"
+
+pybluecurrent relay
+```
+
+It publishes, retained, as JSON with a UTC `timestamp`:
+
+| Topic | Contents |
+|---|---|
+| `bluecurrent/{evse_id}/{socket_id}/status` | the live status of one socket, every `--poll-interval` seconds (30; at least 15), right after a command (at most once a second), and on each status message the backend pushes |
+| `bluecurrent/{evse_id}/settings` | the charge point's settings, including its smart-charging profiles; read again when a socket's activity changes and after every successful command (at most once a poll interval), and every `--settings-interval` seconds (an hour; at least two minutes) for changes made in the app |
+| `bluecurrent/{evse_id}/grid` | the grid current, kept up to date from the backend's own messages, and read in full with the settings |
+| `bluecurrent/{evse_id}/transactions` | one message per finished charging session (not retained), with `--sync-transactions`. Without `--transaction-state-file`, a restart publishes the last `--transaction-lookback-days` again, so set one if you add them up |
+| `bluecurrent/backend_health` | `up`, or `down` with the error; repeated every minute so its `timestamp` shows the relay is alive |
+
+Every option can also be set through an environment variable: its name in capitals, after
+`BLUECURRENT_`, such as `BLUECURRENT_MQTT_HOST` for `--mqtt-host`. Run `pybluecurrent relay --help`
+for the details.
+
+To change a setting, publish a JSON command to `bluecurrent/command`. The answer comes on
+`bluecurrent/command/ack` (not retained), with the `id`, `command` and `evse_id` you sent, `status`
+`ok` or `error`, and the `error` when there is one. Commands run one at a time, in the order they
+arrive, so a command that waits for the backend (up to two minutes during an outage) holds back the
+next one. A command sent while the relay is down is lost and gets no answer, so give anything that
+waits for the answer a timeout. Don't publish commands with retain: the relay ignores a retained
+command after a reconnect.
+
+| Command | Arguments | Effect |
+|---|---|---|
+| `set_card` | `uid`: a card's UID, or `null` for no card | sets the plug-and-charge card; refused unless the charge point is available |
+
+```shell
+mosquitto_pub -h broker.example.com -t bluecurrent/command \
+  -m '{"command": "set_card", "evse_id": "BCU123456", "uid": null, "id": "1"}'
+```
+
+Anyone who can publish to `bluecurrent/command` can change your charge point, so limit that with
+your broker's access control. Limit who can read too: the retained settings hold your address and
+your cards.
+
+The backend reports times without a timezone; the relay reads them as Dutch time (Europe/Amsterdam)
+and publishes them in UTC, whatever timezone it runs in.
+
+The relay reconnects to the broker by itself, and keeps one backend session across those reconnects.
+On a reconnect it publishes the settings and grid status it already has again, and reads the status;
+it asks the backend for the rest only when those reads are due. It stops on `SIGTERM` after saying
+it is down, and the broker says so on its behalf if the relay is killed instead (that message has no
+`timestamp`). It does exit when the login fails or the backend connection is given up for good,
+after waiting five minutes — rather than logging in over and over, which BlueCurrent would refuse —
+so give it a restart policy that backs off. A charge point that leaves your account keeps its last
+retained messages, so watch their `timestamp`. The relay runs on Linux and macOS, not on Windows.
 
 ## Methods
 

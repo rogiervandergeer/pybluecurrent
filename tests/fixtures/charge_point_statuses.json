@@ -1,5 +1,5 @@
 {
-  "evse_id": "BCU109470",
+  "evse_id": "BCU123456",
   "items": [
     {
       "activity": "available",
@@ -11,7 +11,7 @@
       "actual_v2": 0,
       "actual_v3": 0,
       "boosting": false,
-      "evse_id": "BCU109470",
+      "evse_id": "BCU123456",
       "max_offline": 10,
       "max_usage": 20,
       "offline_since": "",
@@ -33,7 +33,7 @@
       "actual_v2": 230,
       "actual_v3": 230,
       "boosting": false,
-      "evse_id": "BCU109470",
+      "evse_id": "BCU123456",
       "max_offline": 10,
       "max_usage": 20,
       "offline_since": "",

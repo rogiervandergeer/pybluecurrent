@@ -1,5 +1,5 @@
 from datetime import date, datetime, time
-from typing import Any
+from typing import Any, Callable, Mapping
 
 
 def format_time(value: time | str) -> str:
@@ -12,24 +12,29 @@ def format_date(value: date) -> str:
     return f"{value.day}-{value.month}-{value.year}"
 
 
-def to_jsonable(source: dict[str, Any]) -> dict[str, Any]:
+def to_jsonable(
+    source: Mapping[str, Any], render_datetime: Callable[[datetime], str] = datetime.isoformat
+) -> dict[str, Any]:
     """Copy a response dictionary with its dates and times rendered as strings, nested values included.
 
-    Dates and datetimes become ISO strings; the parsed datetimes are naive, so the strings are too.
-    Times of day become "HH:MM" — the format the setters accept, so a value can go straight back.
+    Dates and datetimes become ISO strings; the parsed datetimes are naive, so the strings are too,
+    unless ``render_datetime`` renders them otherwise. Times of day become "HH:MM" — the format the
+    setters accept, so a value can go straight back.
     """
-    return {key: _to_jsonable_value(value) for key, value in source.items()}
+    return {key: _to_jsonable_value(value, render_datetime) for key, value in source.items()}
 
 
-def _to_jsonable_value(value: Any) -> Any:
+def _to_jsonable_value(value: Any, render_datetime: Callable[[datetime], str]) -> Any:
     if isinstance(value, time):
         return format_time(value)
-    if isinstance(value, date):  # datetime is a subclass of date, so this covers both
+    if isinstance(value, datetime):
+        return render_datetime(value)
+    if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, dict):
-        return {key: _to_jsonable_value(item) for key, item in value.items()}
+        return {key: _to_jsonable_value(item, render_datetime) for key, item in value.items()}
     if isinstance(value, list):
-        return [_to_jsonable_value(item) for item in value]
+        return [_to_jsonable_value(item, render_datetime) for item in value]
     return value
 
 
